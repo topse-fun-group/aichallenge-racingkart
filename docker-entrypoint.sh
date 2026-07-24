@@ -1,15 +1,18 @@
 #!/bin/bash
-# Common container initialization: network tuning + ROS workspace setup.
-# Used as ENTRYPOINT in Dockerfile and sourced from .bashrc for rocker sessions.
+# Common container initialization: ROS workspace setup.
 
-# --- DDS network tuning (multicast on loopback + large receive buffer) ---
-ip link set multicast on lo || true
-sysctl -w net.core.rmem_max=2147483647 >/dev/null || true
-
-# --- Source ROS workspace (skip when not yet built, e.g. first dev session) ---
+# --- Source Autoware & ROS workspace ---
+export PYTHONPATH="/tmp/.local/lib/python3.10/site-packages:${PYTHONPATH}"
+if [ -f /opt/ros/humble/setup.bash ]; then
+    set +u && source /opt/ros/humble/setup.bash
+fi
+if [ -f /autoware/install/setup.bash ]; then
+    set +u && source /autoware/install/setup.bash
+fi
 if [ -f /aichallenge/workspace/install/setup.bash ]; then
-    # shellcheck disable=SC1091
     set +u && source /aichallenge/workspace/install/setup.bash
+elif [ -f /aichallenge/workspace/install/local_setup.bash ]; then
+    set +u && source /aichallenge/workspace/install/local_setup.bash
 fi
 
 # When used as ENTRYPOINT, hand off to the CMD / command.

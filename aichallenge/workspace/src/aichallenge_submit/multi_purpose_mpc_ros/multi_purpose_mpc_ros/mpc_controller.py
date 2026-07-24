@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 
 import yaml
-from typing import List, Tuple, Optional, NamedTuple
+import math
+from typing import List, Dict, Tuple, Optional, NamedTuple
 import dataclasses
 from scipy import sparse
 from scipy.sparse import dia_matrix
@@ -17,9 +18,9 @@ from rclpy.node import Node
 from ament_index_python.packages import get_package_share_directory
 from rclpy.parameter import Parameter
 from visualization_msgs.msg import Marker, MarkerArray
-from rclpy.qos import QoSProfile, QoSDurabilityPolicy
+from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy, QoSHistoryPolicy
 
-from std_msgs.msg import Empty, Bool, Float32MultiArray, Float64MultiArray, Int32
+from std_msgs.msg import Empty, Bool, Float32MultiArray, Int32
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Quaternion, Pose2D, Point, Vector3
 from std_msgs.msg import ColorRGBA
@@ -29,7 +30,13 @@ from rclpy.parameter import Parameter
 
 # autoware
 from autoware_auto_control_msgs.msg import AckermannControlCommand
+from autoware_auto_vehicle_msgs.msg import GearCommand
 from autoware_auto_planning_msgs.msg import Trajectory
+from v2x_msgs.msg import V2XVehiclePositionArray
+from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
+    V2XVehicleTracker,
+    predictions_to_obstacles,
+)
 
 # Multi_Purpose_MPC
 from multi_purpose_mpc_ros.core.map import Map, Obstacle
@@ -106,6 +113,8 @@ class MPCConfig:
     steer_low_pass_gain: float
     wp_id_offset: int
     use_max_kappa_pred: bool
+    delay_compensation_sec: float
+    enable_dynamic_delay_compensation: bool
 
 
 class MPCController(Node):
@@ -127,14 +136,20 @@ class MPCController(Node):
 
         # declare parameters
         self.declare_parameter("use_boost_acceleration", False)
-        self.declare_parameter("use_obstacle_avoidance", False)
+        self.declare_parameter("use_obstacle_avoidance", True)
         self.declare_parameter("use_stats", False)
+        self.declare_parameter("vehicle_id", os.environ.get("VEHICLE_ID", "d1"))
 
         # get parameters
         self.use_sim_time = self.get_parameter("use_sim_time").get_parameter_value().bool_value
         self.USE_BUG_ACC = self.get_parameter("use_boost_acceleration").get_parameter_value().bool_value
         self.USE_OBSTACLE_AVOIDANCE = self.get_parameter("use_obstacle_avoidance").get_parameter_value().bool_value
         self.use_stats = self.get_parameter("use_stats").get_parameter_value().bool_value
+        self._vehicle_id = self.get_parameter("vehicle_id").get_parameter_value().string_value
+        if self._vehicle_id in ["A0", "default"]:
+            domain_id = int(os.environ.get("ROS_DOMAIN_ID", "1"))
+            self._vehicle_id = f"d{domain_id}"
+        self.get_logger().info(f"VEHICLE ID INITIALIZED AS: {self._vehicle_id}")
 
         self._config_path = config_path
         self._ref_vel_config_path: Optional[str] = ref_vel_config_path
@@ -157,20 +172,6 @@ class MPCController(Node):
             self.get_logger().warn("------------------------------------")
             self.get_logger().warn("USE_OBSTACLE_AVOIDANCE is enabled!")
             self.get_logger().warn("------------------------------------")
-
-    def destroy(self) -> None:
-        self._timer.destroy() # type: ignore
-        self._command_pub.shutdown() # type: ignore
-        self._mpc_pred_pub.shutdown() # type: ignore
-        self._mpc_pred_pub_dummy.shutdown() # type: ignore
-        self._ref_path_pub.shutdown() # type: ignore
-        self._ref_path_pub_dummy.shutdown() # type: ignore
-        self._odom_sub.shutdown() # type: ignore
-        if self.USE_OBSTACLE_AVOIDANCE:
-            self._obstacles_sub.shutdown() # type: ignore
-
-        self._group.destroy() # type: ignore
-        super().destroy_node()
 
     def _load_config(self) -> NamedTuple:
 
@@ -247,6 +248,8 @@ class MPCController(Node):
             self.declare_parameter("accel_low_pass_gain", mpc_cfg.accel_low_pass_gain)
             self.declare_parameter("steer_low_pass_gain", mpc_cfg.steer_low_pass_gain)
             self.declare_parameter("wp_id_offset", mpc_cfg.wp_id_offset)
+            self.declare_parameter("delay_compensation_sec", mpc_cfg.delay_compensation_sec)
+            self.declare_parameter("enable_dynamic_delay_compensation", mpc_cfg.enable_dynamic_delay_compensation)
 
         def param_cb(parameters):
             cfg_mpc = self._cfg.mpc # type: ignore
@@ -320,6 +323,14 @@ class MPCController(Node):
                     mpc_cfg.wp_id_offset = param.value
                     self._mpc.update_wp_id_offset(param.value)
                     self.get_logger().warn(f"wp_id_offset was updated to '{param.value}'")
+
+                elif param.name == "delay_compensation_sec" and param.type_ == Parameter.Type.DOUBLE:
+                    mpc_cfg.delay_compensation_sec = param.value
+                    self.get_logger().warn(f"delay_compensation_sec was updated to '{param.value}'")
+
+                elif param.name == "enable_dynamic_delay_compensation" and param.type_ == Parameter.Type.BOOL:
+                    mpc_cfg.enable_dynamic_delay_compensation = param.value
+                    self.get_logger().warn(f"enable_dynamic_delay_compensation was updated to '{param.value}'")
 
 
             return SetParametersResult(successful=True)
@@ -401,7 +412,9 @@ class MPCController(Node):
                 cfg_mpc.accel_low_pass_gain,
                 cfg_mpc.steer_low_pass_gain,
                 cfg_mpc.wp_id_offset,
-                cfg_mpc.use_max_kappa_pred)
+                cfg_mpc.use_max_kappa_pred,
+                float(getattr(cfg_mpc, 'delay_compensation_sec', 0.10)),
+                bool(getattr(cfg_mpc, 'enable_dynamic_delay_compensation', True)))
 
             state_constraints = {
                 "xmin": np.array([-np.inf, -np.inf, -np.inf]),
@@ -448,6 +461,13 @@ class MPCController(Node):
         self._mpc_cfg, self._mpc = create_mpc(self._car)
         compute_speed_profile(self._car, self._mpc_cfg)
 
+        # If not using topic-based path constraints, initialize static path_constraints now
+        # so MPC always has valid bounds even with use_obstacle_avoidance: true
+        if not self._cfg.reference_path.use_path_constraints_topic:  # type: ignore
+            mpc_N = int(self._cfg.mpc.N)  # type: ignore
+            safety_margin = float(self._car.safety_margin)
+            self._reference_path.update_simple_path_constraints(mpc_N, safety_margin)
+
         self._ref_vel_configulator: Optional[ReferenceVelocityConfigulator] = create_ref_vel_configulator()
 
         self._trajectory: Optional[Trajectory] = None
@@ -455,10 +475,43 @@ class MPCController(Node):
 
         # Obstacles
         if self.USE_OBSTACLE_AVOIDANCE:
-            self._obstacles = create_obstacles()
-            self._use_obstacles_topic = self._obstacles == []
-            self._obstacles_updated = False
-            self._last_obstacles_msgs_raw = None
+            self._static_obstacles: List[Obstacle] = create_obstacles()
+            self._dynamic_obstacles: List[Obstacle] = []
+            self._obstacles_updated = bool(self._static_obstacles)
+            self._had_obstacles = False
+            v2x_cfg = self._cfg.v2x_obstacle_avoidance  # type: ignore
+            self._v2x_tracker = V2XVehicleTracker(
+                v_max_safety=float(v2x_cfg.v_max_safety),
+                position_jump_threshold=float(v2x_cfg.position_jump_threshold),
+                warn_callback=self.get_logger().warn,
+            )
+            self._v2x_vehicle_radius = float(v2x_cfg.vehicle_radius)
+            self._v2x_vehicle_radius_normal = float(v2x_cfg.vehicle_radius)
+            mpc_N = int(self._cfg.mpc.N)  # type: ignore
+            t_horizon = mpc_N / float(self._cfg.mpc.control_rate)  # type: ignore
+            self._v2x_t_samples = [
+                k * t_horizon / max(mpc_N - 1, 1) for k in range(mpc_N)
+            ]
+            # コリドー外の V2X 障害物で MPC のコリドー狭窄/反転が起きないよう、
+            # ref-path 近傍のみに絞り込む。閾値 = max_width/2 + vehicle_radius + 余白。
+            ref_max_width = float(self._cfg.reference_path.max_width)  # type: ignore
+            self._v2x_corridor_threshold_sq = (
+                ref_max_width / 2.0 + self._v2x_vehicle_radius + 0.5
+            ) ** 2
+            wps = self._reference_path.waypoints
+            self._waypoint_xy = np.asarray(
+                [(wp.x, wp.y) for wp in wps], dtype=np.float64)
+
+            # V2X 近接制御・追い越しモード状態
+            self._v2x_speed_limit: float = float('inf')   # 動的速度上限 [m/s]
+            self._v2x_mode: str = "NORMAL"                # NORMAL / FOLLOWING / OVERTAKING / EMERGENCY_BRAKE
+            self._v2x_following_since: Optional[float] = None  # FOLLOWING 開始時刻 [s]
+            self._v2x_motion_start_time: Optional[float] = None  # 車両が動き出した時刻 [s]
+
+        # Stuck Recovery 状態管理
+        self._stuck_state: str = "NORMAL"  # NORMAL / REVERSING / STOP_BEFORE_FORWARD
+        self._stuck_timer_start: Optional[float] = None
+        self._stuck_phase_start: Optional[float] = None
 
         # Laps
         self._current_laps = 1
@@ -484,6 +537,9 @@ class MPCController(Node):
 
     def _setup_pub_sub(self) -> None:
         # Publishers
+        self._gear_pub = self.create_publisher(
+            GearCommand, "/control/command/gear_cmd", 1)
+
         if self.USE_BUG_ACC:
           self._command_pub = self.create_publisher(
             AckermannControlBoostCommand, "/boost_commander/command", 1)
@@ -512,8 +568,15 @@ class MPCController(Node):
             Odometry, "/localization/kinematic_state", self._odom_callback, 1)
         self._control_mode_request_sub = self.create_subscription(
             Bool, "control/control_mode_request_topic", self._control_mode_request_callback, 1)
+        # simple_trajectory_generator publishes with BEST_EFFORT/KEEP_LAST(1) — match it
+        # so the subscription is QoS-compatible (rclpy default is RELIABLE).
+        trajectory_qos = QoSProfile(
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
         self._trajectory_sub = self.create_subscription(
-            Trajectory, "planning/scenario_planning/trajectory", self._trajectory_callback, 1)
+            Trajectory, "planning/scenario_planning/trajectory", self._trajectory_callback, trajectory_qos)
         self._stop_request_sub = self.create_subscription(
             Empty, "/control/mpc/stop_request", self._stop_request_callback, 1)
 
@@ -524,10 +587,6 @@ class MPCController(Node):
                 Int32, "/aichallenge/pitstop/condition", self._condition_callback, 1)
 
         if self.USE_OBSTACLE_AVOIDANCE:
-            self._obstacles_sub = self.create_subscription(
-                Float64MultiArray, "/aichallenge/objects", self._obstacles_callback, 1)
-                # Float64MultiArray, "/aichallenge/objects2", self._obstacles_callback, 1)
-
             if self._cfg.reference_path.use_path_constraints_topic: # type: ignore
                 self._path_constraints_sub = self.create_subscription(
                     PathConstraints, "/path_constraints_provider/path_constraints", self._path_constraints_callback, 1)
@@ -535,6 +594,12 @@ class MPCController(Node):
             if self._cfg.reference_path.use_border_cells_topic: # type: ignore
                 self._border_cells_sub = self.create_subscription(
                     BorderCells, "/path_constraints_provider/border_cells", self._border_cells_callback, 1)
+
+            self._v2x_sub = self.create_subscription(
+                V2XVehiclePositionArray,
+                "/v2x/vehicle_positions",
+                self._v2x_callback,
+                1)
 
     def _create_ackerman_control_command(self, stamp, u, acc, bug_acc_enabled):
         v_cmd = u[0]
@@ -554,32 +619,27 @@ class MPCController(Node):
         cmd = self._create_ackerman_control_command(stamp, u, acc, bug_acc_enabled)
 
         # publish raw control command
-        self._command_raw_pub.publish(cmd)
+        if not self.USE_BUG_ACC:
+            self._command_raw_pub.publish(cmd)
 
         # compensate steering angle for the real vehicle
         # AWSIMにおいても後段のactuation_cmd_converter でgainを考慮した指令を生成するため、実機/sim問わず
         # gain を掛ける
-        cmd.lateral.steering_tire_angle *= self._mpc_cfg.steering_tire_angle_gain_var
+        if self.USE_BUG_ACC:
+            cmd.command.lateral.steering_tire_angle *= self._mpc_cfg.steering_tire_angle_gain_var
+        else:
+            cmd.lateral.steering_tire_angle *= self._mpc_cfg.steering_tire_angle_gain_var
         self._command_pub.publish(cmd)
+
+    def _publish_gear_command(self, gear_val: int) -> None:
+        gear_msg = GearCommand()
+        gear_msg.stamp = self.get_clock().now().to_msg()
+        gear_msg.command = gear_val
+        self._gear_pub.publish(gear_msg)
 
 
     def _odom_callback(self, msg: Odometry) -> None:
         self._odom = msg
-
-    def _obstacles_callback(self, msg: Float64MultiArray) -> None:
-        if not self._use_obstacles_topic:
-            return
-
-        obstacles_updated = (self._last_obstacles_msgs_raw != msg.data) and (len(msg.data) > 0)
-        if obstacles_updated:
-            self._last_obstacles_msgs_raw = msg.data
-            self._obstacles = []
-            for i in range(0, len(msg.data), 4):
-                x = msg.data[i]
-                y = msg.data[i + 1]
-                self._obstacles.append(Obstacle(cx=x, cy=y, radius=self._cfg.obstacles.radius)) # type: ignore
-            # NOTE: This flag should be set to True only after the obstacles are updated
-            self._obstacles_updated = True
 
     def _control_mode_request_callback(self, msg):
         if msg.data and not self._enable_control:
@@ -589,6 +649,197 @@ class MPCController(Node):
     def _path_constraints_callback(self, msg: PathConstraints):
         self._reference_path.set_path_constraints(
             msg.upper_bounds, msg.lower_bounds, msg.rows, msg.cols)
+
+    def _v2x_callback(self, msg: V2XVehiclePositionArray) -> None:
+        self._v2x_tracker.update(msg)
+        active_ids = self._v2x_tracker.active_vehicle_ids()
+        self.get_logger().info(f"V2X active ids: {active_ids}, ego id: {self._vehicle_id}", throttle_duration_sec=2.0)
+
+        ego_x, ego_y = 0.0, 0.0
+        # 近接制御・追い越しモードの更新
+        if self._odom is not None:
+            pose = odom_to_pose_2d(self._odom)
+            ego_x, ego_y = pose.x, pose.y
+            ego_speed = self._odom.twist.twist.linear.x
+            self._update_v2x_mode(pose.x, pose.y, pose.theta, ego_speed)
+
+        predictions = {}
+        for vid in active_ids:
+            if vid == self._vehicle_id:
+                continue
+            pred_pts = self._v2x_tracker.predict_positions(vid, self._v2x_t_samples)
+            if self._odom is not None and pred_pts and len(pred_pts) > 0:
+                # 自車位置から1.2m以内の障害物は自分自身とみなして完全除外
+                first_pt = pred_pts[0]
+                if math.hypot(first_pt[0] - ego_x, first_pt[1] - ego_y) < 1.2:
+                    continue
+            predictions[vid] = pred_pts
+
+        self._dynamic_obstacles = predictions_to_obstacles(
+            predictions, self._v2x_vehicle_radius)
+        self._obstacles_updated = True
+
+    def _update_v2x_mode(
+        self, ego_x: float, ego_y: float, ego_yaw: float, ego_speed_mps: float
+    ) -> None:
+        """前方車両との距離・TTC を評価して走行モードと速度制限を更新する。
+
+        モード遷移:
+          NORMAL ──[前方15m以内]──▶ FOLLOWING ──[5s追走後]──▶ OVERTAKING
+          FOLLOWING / OVERTAKING ──[TTC<3s or 距離<6m]──▶ EMERGENCY_BRAKE
+          OVERTAKING ──[前方10m以上クリア]──▶ NORMAL
+        """
+        v2x_cfg = self._cfg.v2x_obstacle_avoidance  # type: ignore
+        follow_start = float(v2x_cfg.follow_distance_start)
+        follow_brake = float(v2x_cfg.follow_distance_brake)
+        v_min_safe_mps = kmh_to_m_per_sec(float(v2x_cfg.v_min_safe))
+        ttc_thresh = float(v2x_cfg.ttc_threshold)
+        fwd_cos_thresh = float(getattr(v2x_cfg, 'forward_cos_threshold', 0.5))
+        overtake_patience = float(v2x_cfg.overtake_patience)
+        overtake_gap_min = float(v2x_cfg.overtake_gap_min)
+        overtake_clearance = float(v2x_cfg.overtake_clearance)
+        vehicle_radius_overtake = float(v2x_cfg.vehicle_radius_overtake)
+        v_max_normal = self._mpc_cfg.v_max
+
+        min_d = float('inf')
+        min_ttc = float('inf')
+        lead_speed = 0.0
+        is_leading_ahead = False
+
+        fwd_cos = math.cos(ego_yaw)
+        fwd_sin = math.sin(ego_yaw)
+
+        for vid in self._v2x_tracker.active_vehicle_ids():
+            if vid == self._vehicle_id:
+                continue
+            buf = self._v2x_tracker._samples.get(vid)
+            if not buf:
+                continue
+            _, ox, oy = buf[-1]
+            vx, vy = self._v2x_tracker.velocity(vid)
+
+            dx = ox - ego_x
+            dy = oy - ego_y
+            d = math.hypot(dx, dy)
+
+            # 自車位置そのもの（0.5m未満）は自分自身の可能性が高いため絶対除外
+            if d < 0.5:
+                continue
+
+            # 前方判定：進行方向の内積をユークリッド距離で割ったcos値が閾値以上
+            # （0.5 = 60度以内を「前方」と判定。横並び車両を除外）
+            dot = dx * fwd_cos + dy * fwd_sin
+            cos_angle = dot / max(d, 0.001)  # = cos(相対角度)
+            is_ahead = cos_angle >= fwd_cos_thresh
+
+            if is_ahead and d < min_d:
+                min_d = d
+                is_leading_ahead = True
+                lead_speed = math.hypot(vx, vy)
+                # 相対接近速度（自車進行方向成分）
+                ego_vx = ego_speed_mps * fwd_cos
+                ego_vy = ego_speed_mps * fwd_sin
+                rel_approach = (ego_vx - vx) * fwd_cos + (ego_vy - vy) * fwd_sin
+                if rel_approach > 0.0:
+                    min_ttc = d / rel_approach
+                else:
+                    min_ttc = float('inf')  # 離れていく・同速
+
+        now_sec = self.get_clock().now().nanoseconds / 1e9
+
+        # ---- スタート抑制：車両が動き出してから N 秒間は V2X 制御を無効化 ----
+        # グリッド並走スタートで隣の車が近いため EMERGENCY_BRAKE が誤発動するのを防ぐ
+        startup_suppress_sec = float(getattr(v2x_cfg, 'startup_suppress_sec', 15.0))
+        MOTION_THRESHOLD_MPS = 1.0  # [m/s] この速度を超えた時点を「動き出し」と定義
+        if ego_speed_mps >= MOTION_THRESHOLD_MPS and self._v2x_motion_start_time is None:
+            self._v2x_motion_start_time = now_sec
+            self.get_logger().info(
+                f"[V2X] Vehicle started moving (v={ego_speed_mps:.1f}m/s). "
+                f"V2X suppressed for {startup_suppress_sec:.0f}s.")
+        if (self._v2x_motion_start_time is None or
+                now_sec - self._v2x_motion_start_time < startup_suppress_sec):
+            self._v2x_mode = "NORMAL"
+            self._v2x_speed_limit = float('inf')
+            return
+
+        # ---- モード遷移ロジック ----
+
+        # EMERGENCY_BRAKE: TTC 危険 or 距離が非常に近い
+        if min_ttc < ttc_thresh or (is_leading_ahead and min_d < follow_brake):
+            self._v2x_mode = "EMERGENCY_BRAKE"
+            self._v2x_speed_limit = v_min_safe_mps
+            self.get_logger().warn(
+                f"[V2X] EMERGENCY_BRAKE: d={min_d:.1f}m ttc={min_ttc:.1f}s",
+                throttle_duration_sec=1.0)
+
+        # NORMAL → FOLLOWING: 前方に車両が近づいてきた
+        elif is_leading_ahead and min_d < follow_start and self._v2x_mode == "NORMAL":
+            self._v2x_mode = "FOLLOWING"
+            self._v2x_following_since = now_sec
+            target_follow_speed = max(lead_speed, v_min_safe_mps)
+            ratio = max(0.0, (min_d - follow_brake) / (follow_start - follow_brake))
+            acc_speed = target_follow_speed + ratio * (v_max_normal - target_follow_speed)
+            self._v2x_speed_limit = min(v_max_normal, acc_speed)
+            self.get_logger().info(
+                f"[V2X] FOLLOWING (ACC): d={min_d:.1f}m lead_v={lead_speed*3.6:.1f}km/h v_lim={self._v2x_speed_limit*3.6:.1f}km/h",
+                throttle_duration_sec=1.0)
+
+        # FOLLOWING: 速度制限を距離と前車速度に応じて動的に更新 (Adaptive Cruise Control)
+        elif self._v2x_mode == "FOLLOWING":
+            if not is_leading_ahead or min_d >= follow_start:
+                # 前方車がいなくなった → NORMAL に戻る
+                self._v2x_mode = "NORMAL"
+                self._v2x_speed_limit = float('inf')
+                self._v2x_following_since = None
+                self.get_logger().info("[V2X] Back to NORMAL (vehicle left front zone)")
+            else:
+                # 継続 FOLLOWING: 前車速度に応じた適応型スロットル調整
+                target_follow_speed = max(lead_speed, v_min_safe_mps)
+                ratio = max(0.0, (min_d - follow_brake) / (follow_start - follow_brake))
+                acc_speed = target_follow_speed + ratio * (v_max_normal - target_follow_speed)
+                self._v2x_speed_limit = min(v_max_normal, acc_speed)
+
+                # FOLLOWING → OVERTAKING 判断
+                following_duration = now_sec - (self._v2x_following_since or now_sec)
+                if (following_duration >= overtake_patience
+                        and min_d <= overtake_gap_min):
+                    self._v2x_mode = "OVERTAKING"
+                    self._v2x_vehicle_radius = vehicle_radius_overtake
+                    self._v2x_speed_limit = float('inf')  # 速度制限解除
+                    self.get_logger().info(
+                        f"[V2X] OVERTAKING: following={following_duration:.1f}s d={min_d:.1f}m")
+
+        # OVERTAKING: 追い越し継続 or 完了チェック
+        elif self._v2x_mode == "OVERTAKING":
+            # 完了判定: 前方車が後方かつ十分な距離
+            if not is_leading_ahead and min_d >= overtake_clearance:
+                self._v2x_mode = "NORMAL"
+                self._v2x_vehicle_radius = self._v2x_vehicle_radius_normal
+                self._v2x_speed_limit = float('inf')
+                self._v2x_following_since = None
+                self.get_logger().info(
+                    f"[V2X] Overtaking COMPLETE! d={min_d:.1f}m. Back to NORMAL.")
+            else:
+                # 追い越し中は速度制限しない
+                self._v2x_speed_limit = float('inf')
+
+        # NORMAL: 制限なし
+        else:
+            self._v2x_mode = "NORMAL"
+            self._v2x_speed_limit = float('inf')
+            self._v2x_following_since = None
+
+    def _filter_obstacles_to_corridor(self, obstacles: List[Obstacle]) -> List[Obstacle]:
+        if not obstacles or self._waypoint_xy.size == 0:
+            return obstacles
+        thr_sq = self._v2x_corridor_threshold_sq
+        wps = self._waypoint_xy
+        kept: List[Obstacle] = []
+        for ob in obstacles:
+            dxy = wps - np.array([ob.cx, ob.cy], dtype=np.float64)
+            if np.min(np.einsum('ij,ij->i', dxy, dxy)) <= thr_sq:
+                kept.append(ob)
+        return kept
 
     def _border_cells_callback(self, msg: BorderCells):
         self._reference_path.set_border_cells(
@@ -743,12 +994,6 @@ class MPCController(Node):
         self._control_rate.sleep()
 
         if self._loop % 100 == 0:
-            # update obstacles
-            if self.USE_OBSTACLE_AVOIDANCE and not self._use_obstacles_topic:
-                # self._obstacle_manager.push_next_obstacle()
-                self._obstacles = self._obstacle_manager.current_obstacles
-                self._obstacles_updated = True
-
             # update reference path
             if self._cfg.reference_path.update_by_topic: # type: ignore
                 new_referece_path = self._create_reference_path_from_autoware_trajectory(self._trajectory)
@@ -767,10 +1012,20 @@ class MPCController(Node):
 
         if self.USE_OBSTACLE_AVOIDANCE and self._obstacles_updated:
             self._obstacles_updated = False
-            # self.get_logger().info("Obstacles updated")
-            self._map.reset_map()
-            self._map.add_obstacles(self._obstacles)
-            self._reference_path.reset_dynamic_constraints()
+            filtered_dynamic = self._filter_obstacles_to_corridor(self._dynamic_obstacles)
+            active_obs = self._static_obstacles + filtered_dynamic
+
+            # 有効な障害物が存在する場合のみマップ再構築を行い、障害物ゼロ時は不要なリセットを抑止して完全固定・平滑走行を維持
+            if len(active_obs) > 0:
+                self._map.reset_map()
+                self._map.add_obstacles(active_obs)
+                self._reference_path.reset_dynamic_constraints()
+                self._had_obstacles = True
+            elif self._had_obstacles:
+                # 障害物がクリアされた瞬間のみ1回リセット
+                self._map.reset_map()
+                self._reference_path.reset_dynamic_constraints()
+                self._had_obstacles = False
 
         is_colliding = False
         if self._last_colliding_time is not None:
@@ -781,7 +1036,18 @@ class MPCController(Node):
         pose = odom_to_pose_2d(self._odom) # type: ignore
         v = self._odom.twist.twist.linear.x
 
+        # 車両状態は実オドメトリ位置で更新（コリドー境界・マップ参照のズレを防止）
         self._car.update_states(pose.x, pose.y, pose.theta)
+
+        # 速度に応じたマイルドな動的先読みオフセット調整
+        if self._mpc_cfg.enable_dynamic_delay_compensation:
+            delay_sec = self._mpc_cfg.delay_compensation_sec
+            resolution = self._reference_path.resolution
+            dynamic_offset = int((v * delay_sec) / max(resolution, 1e-3))
+            total_offset = max(1, self._mpc_cfg.wp_id_offset + dynamic_offset)
+            self._mpc.update_wp_id_offset(total_offset)
+        else:
+            self._mpc.update_wp_id_offset(self._mpc_cfg.wp_id_offset)
         # print(f"car x: {self._car.temporal_state.x}, y: {self._car.temporal_state.y}, psi: {self._car.temporal_state.psi}")
         # print(f"mpc x: {self._mpc.model.temporal_state.x}, y: {self._mpc.model.temporal_state.y}, psi: {self._mpc.model.temporal_state.psi}")
 
@@ -789,14 +1055,27 @@ class MPCController(Node):
             u, max_delta = self._mpc.get_control()
             # self.get_logger().info(f"u: {u}")
 
+        # ベースの制限速度（通常速度プロファイルまたはリファレンス速度）を決定
         if self._ref_vel_configulator is not None:
-            ref_vel_mps = self._ref_vel_configulator.get_ref_vel(self._mpc.model.wp_id)
-            ref_vel_kmph = min(
-                kmh_to_m_per_sec(ref_vel_mps),
+            ref_vel_kmh = self._ref_vel_configulator.get_ref_vel(self._mpc.model.wp_id)
+            base_v_max_mps = min(
+                kmh_to_m_per_sec(ref_vel_kmh),
                 self._mpc_cfg.v_max)
-            self._mpc.update_v_max(ref_vel_kmph)
-            v_ref: List[float] = [ref_vel_kmph] * len(self._reference_path.waypoints)
-            self._reference_path.set_v_ref(v_ref)
+        else:
+            base_v_max_mps = self._mpc_cfg.v_max
+
+        # V2X障害物回避が有効かつ動的速度制限がベース速度を下回る場合、速度を制限する
+        v_max_effective = base_v_max_mps
+        if self.USE_OBSTACLE_AVOIDANCE and self._v2x_speed_limit < base_v_max_mps:
+            v_max_effective = max(self._v2x_speed_limit, 0.0)
+            self.get_logger().info(
+                f"[V2X] Applying speed limit: mode={self._v2x_mode} v_lim={v_max_effective:.2f} m/s (base={base_v_max_mps:.2f} m/s)",
+                throttle_duration_sec=1.0)
+
+        # MPCとウェイポイントの目標速度を更新
+        self._mpc.update_v_max(v_max_effective)
+        v_ref: List[float] = [v_max_effective] * len(self._reference_path.waypoints)
+        self._reference_path.set_v_ref(v_ref)
 
         # override by brake command if control is disabled
         if not self._enable_control:
@@ -845,8 +1124,89 @@ class MPCController(Node):
         self._last_u[0] = u[0]
         self._last_u[1] = u[1]
 
+        # --- Stuck Recovery Logic ---
+        stuck_cfg = getattr(self._cfg, 'stuck_recovery', None)
+        enable_stuck_rec = getattr(stuck_cfg, 'enable_stuck_recovery', True) if stuck_cfg else True
+
+        if enable_stuck_rec and self._enable_control:
+            stuck_vel_thresh = float(getattr(stuck_cfg, 'stuck_velocity_threshold', 0.15)) if stuck_cfg else 0.15
+            stuck_time_thresh = float(getattr(stuck_cfg, 'stuck_time_threshold', 3.0)) if stuck_cfg else 3.0
+            rev_speed = float(getattr(stuck_cfg, 'reverse_speed', -2.5)) if stuck_cfg else -2.5
+            rev_duration = float(getattr(stuck_cfg, 'reverse_duration', 2.0)) if stuck_cfg else 2.0
+            stop_duration = float(getattr(stuck_cfg, 'stop_duration', 0.4)) if stuck_cfg else 0.4
+
+            now_sec = now.nanoseconds / 1e9
+
+            # 制御開始直後（3.0秒以内）かつ非衝突時は発進保護ガード
+            if self._loop < 120 and not is_colliding:
+                self._stuck_timer_start = None
+
+            elif self._stuck_state == "NORMAL":
+                # 壁衝突時: abs(v) <= 0.8 m/s かつ 0.5秒継続で即座にリカバリー発動
+                # 非衝突時: abs(v) <= stuck_vel_thresh かつ 1.0秒継続でリカバリー発動
+                # (MPCが解なしで u[0] = 0 を出力している壁めり込み時も検出)
+                is_stuck_candidate = (
+                    (is_colliding and abs(v) <= 0.8) or
+                    (abs(v) <= stuck_vel_thresh)
+                )
+
+                req_time = 0.5 if is_colliding else stuck_time_thresh
+
+                if is_stuck_candidate:
+                    if self._stuck_timer_start is None:
+                        self._stuck_timer_start = now_sec
+                    elif (now_sec - self._stuck_timer_start) >= req_time:
+                        self._stuck_state = "BRAKE_BEFORE_REVERSE"
+                        self._stuck_phase_start = now_sec
+                        self.get_logger().warn(f"[STUCK RECOVERY] Stuck detected! (v={v:.2f} m/s, colliding={is_colliding}, duration={now_sec - self._stuck_timer_start:.1f}s). Initiating reverse sequence...")
+                else:
+                    self._stuck_timer_start = None
+
+            elif self._stuck_state == "BRAKE_BEFORE_REVERSE":
+                elapsed = now_sec - (self._stuck_phase_start or now_sec)
+                if elapsed < stop_duration:
+                    u[0] = 0.0
+                    acc = -3.0
+                    u[1] = 0.0
+                    bug_acc_enabled = False
+                    self.get_logger().warn(f"[STUCK RECOVERY] Braking for reverse gear shift... ({elapsed:.1f}/{stop_duration:.1f}s)", throttle_duration_sec=0.3)
+                else:
+                    self._stuck_state = "REVERSING"
+                    self._stuck_phase_start = now_sec
+                    self.get_logger().warn("[STUCK RECOVERY] Shifted to REVERSE. Reversing now...")
+
+            elif self._stuck_state == "REVERSING":
+                elapsed = now_sec - (self._stuck_phase_start or now_sec)
+                if elapsed < rev_duration:
+                    u[0] = abs(rev_speed)
+                    acc = 1.5
+                    u[1] = 0.0
+                    bug_acc_enabled = False
+                    self.get_logger().warn(f"[STUCK RECOVERY] Reversing straight... v_cmd={u[0]:.1f} m/s, acc={acc:.1f} ({elapsed:.1f}/{rev_duration:.1f}s)", throttle_duration_sec=0.3)
+                else:
+                    self._stuck_state = "STOP_BEFORE_FORWARD"
+                    self._stuck_phase_start = now_sec
+                    self.get_logger().info("[STUCK RECOVERY] Reverse complete. Stopping before shifting forward...")
+
+            elif self._stuck_state == "STOP_BEFORE_FORWARD":
+                elapsed = now_sec - (self._stuck_phase_start or now_sec)
+                if elapsed < stop_duration:
+                    u[0] = 0.0
+                    acc = -1.0
+                    u[1] = 0.0
+                    bug_acc_enabled = False
+                else:
+                    self._car.update_reference_path(self._car.reference_path)
+                    self._stuck_state = "NORMAL"
+                    self._stuck_timer_start = None
+                    self.get_logger().warn("[STUCK RECOVERY] Resuming normal forward MPC control!")
+
         # update car state (use v for feedback actual speed)
         self._car.drive([v, u[1]])
+
+        # Publish GearCommand (DRIVE = 2 / REVERSE = 20)
+        target_gear = GearCommand.REVERSE if self._stuck_state in ["BRAKE_BEFORE_REVERSE", "REVERSING"] else GearCommand.DRIVE
+        self._publish_gear_command(target_gear)
 
         # Publish control command
         self._publish_control_command(now, u, acc, bug_acc_enabled)

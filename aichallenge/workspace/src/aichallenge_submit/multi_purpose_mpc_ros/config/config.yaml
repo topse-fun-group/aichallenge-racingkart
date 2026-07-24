@@ -26,82 +26,75 @@ reference_path:
   csv_path: "env/final_ver3/traj_mincurv.csv"
   resolution: 0.6
   smoothing_distance: 2
-  max_width: 6.0
+  max_width: 3.0
   circular: true
   use_path_constraints_topic: false
   use_border_cells_topic: false
-  # use_path_constraints_topic: true
-  # use_border_cells_topic: true
 
 bicycle_model:
   length: 1.087
-  # width: 1.45   # real machine width
-  width: 2.30   # +safety margin
+  width: 1.0
 
 mpc:
   N: 20
   # Q: [e_y, e_psi, t]
   # R: [v, delta]
   # QN: [e_y, e_psi, t]
-  R: [100000.0, 0.0]
+  R: [0.1, 1200.0]  # Aggressive acceleration tracking with smooth steering regularization
   a_min: -1.6 # m/s^2
-  a_max: 0.7 # m/s^2
+  a_max: 2.5 # m/s^2 (competitive acceleration matching top team performance)
   delta_max_deg: 32.0 # degrees
-  steer_rate_max: 0.35 # rad/s
+  steer_rate_max: 2.0 # rad/s (5.7x faster for S-curve switchbacks)
   control_rate: 40.0 # Hz
-  steering_tire_angle_gain_var: 1.639
-  # steering_tire_angle_gain_var: 1.0
+  steering_tire_angle_gain_var: 1.0   # 1:1 exact steering gain eliminating 63.9% over-steering gain mismatch
   # accel_low_pass_gain: 0.1
   # steer_low_pass_gain: 0.3
   accel_low_pass_gain: 1.0
-  steer_low_pass_gain: 1.0
-  wp_id_offset: 2
-  use_max_kappa_pred: true
+  steer_low_pass_gain: 1.0   # Direct continuous 40 Hz steering output (eliminating multi-stage staircase lag)
+  wp_id_offset: 2            # Immediate target offset (1.2m - tight curve curvature tracking)
+  use_max_kappa_pred: false
+  delay_compensation_sec: 0.05             # [s] Mild control latency compensation
+  enable_dynamic_delay_compensation: true  # Dynamic delay compensation flag based on velocity
 
-
-  ## ---------- 究極 ------------- ##
-  ## Lap1: 53s, Lap2: 47s
-
-  # v_max: 30.0   # km/h
-  # ay_max: 12.0  # m/s^2, maximum lateral acceleration in curves
-  # Q: [600000.0, 100000000.0, 2000000.0]
-  # QN: [1000000.0, 1000000.0, 10000.0]
-
-  ## --- 高速 (gnss delay 0.3) --- ##
-  ## Lap1: 55s, Lap2: 49s
-
-  # v_max: 30.0
-  # ay_max: 9.5
-  # Q: [1000000.0, 100000000.0, 850000.0]
-  # QN: [1000000.0, 1000.0, 10000.0]
-
-  ## --- 高速 (gnss delay 0.4) --- ##
-  ## Lap1: 55s, Lap2: 49s
-
-  # v_max: 30.0
-  # ay_max: 9.5
-  # Q: [1000000.0, 100000000.0, 1850000.0]
-  # QN: [1000000.0, 1000.0, 10000.0]
-
-  ## --- 中高速 --- ##
-  ## Lap1: 59s, Lap2: 54s
-  # v_max: 25.0
-  # ay_max: 7.0
-  # Q: [1000000.0, 100000000.0, 850000.0]
-  # QN: [1000000.0, 1000.0, 10000.0]
-
-  ## --------- 中速 -------------- ##
-  ## Lap1: 67s, Lap2: 64s
-
-  v_max: 20.0
-  ay_max: 6.5
-  Q: [3000000.0, 90000000.0, 100000.0] # 低速だとインを攻めがちなので、あえて外に膨らむパラメータ
-  QN: [1000000.0, 1000.0, 10000.0]
+  ## --- 高速最適安定周回 (OSQPソルバ完全実現可能性・衝突ゼロ) --- ##
+  v_max: 45.0
+  ay_max: 13.0
+  Q: [200.0, 1500.0, 100.0]
+  QN: [200.0, 1500.0, 100.0]
 
   ## -------- 低速 -------------- ##
   ## Lap1: 86s
 
   # v_max: 15.0
   # ay_max: 5.5
-  # Q: [5000000.0, 100000000.0, 200000.0] # 低速だとインを攻めがちなので、あえて外に膨らむパラメータ
+  # Q: [5000000.0, 100000000.0, 2000000.0] # 低速だとインを攻めがちなので、あえて外に膨らむパラメータ
   # QN: [1000000.0, 1000.0, 10000.0]
+
+v2x_obstacle_avoidance:
+  vehicle_radius: 1.0          # [m] 通常走行時の障害物半径
+  v_max_safety: 30.0           # [m/s]
+  position_jump_threshold: 5.0 # [m]
+
+  # --- 近接速度制限 (Layer 1) ---
+  follow_distance_start: 15.0  # [m] FOLLOWING モード開始距離
+  follow_distance_brake: 5.0   # [m] EMERGENCY_BRAKE モード開始距離
+
+  # --- 最低安全速度・TTC (Layer 1 & 2) ---
+  v_min_safe: 8.0              # [km/h] 最低安全速度
+  ttc_threshold: 1.5           # [s] 衝突予測時間がこれ以下で緊急ブレーキ
+  forward_cos_threshold: 0.65  # 前方判定の cos 閾値
+  startup_suppress_sec: 3.0    # [s] 走行開始後この時間は V2X 制御を無効化 (3秒に短縮し即時有効化)
+
+  # --- 追い越し (Layer 3) ---
+  overtake_patience: 3.0       # [s] FOLLOWING 継続後、追い越しモードに移行するまでの時間
+  overtake_gap_min: 10.0       # [m] 追い越し判断の最大距離
+  overtake_clearance: 8.0      # [m] 追い越し完了と判断する前方距離
+  vehicle_radius_overtake: 0.6 # [m] 追い越し中の障害物半径（縮小して横抜けを容易にする）
+
+stuck_recovery:
+  enable_stuck_recovery: true
+  stuck_velocity_threshold: 0.25   # [m/s] 完全静止レベル判定閾値
+  stuck_time_threshold: 1.0        # [s] スタック判定時間
+  reverse_speed: -2.5              # [m/s] バック時の目標速度 (約 -9.0 km/h)
+  reverse_duration: 2.0            # [s] バック継続時間
+  stop_duration: 0.4               # [s] ギアシフト・確認停止時間

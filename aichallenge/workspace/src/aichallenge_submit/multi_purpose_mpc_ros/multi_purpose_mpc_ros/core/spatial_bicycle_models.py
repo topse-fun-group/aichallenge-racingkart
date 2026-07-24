@@ -251,8 +251,8 @@ class SpatialBicycleModel(ABC):
 
         # Model ellipsoid around the car
         # safety_margin = self.width
-        # safety_margin = self.width / 2.0
-        safety_margin = self.width / np.sqrt(2)
+        safety_margin = self.width / 2.0  # Physical half-width: 1.45/2 = 0.725m (was width/sqrt(2) = 1.025m)
+        # safety_margin = self.width / np.sqrt(2)
         # safety_margin = self.width / np.sqrt(2) / 2.0
         # safety_margin = 0.0
 

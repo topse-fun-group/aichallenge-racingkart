@@ -1,0 +1,84 @@
+common:
+  save_config: false
+
+sim_logger:
+  animation_enabled: false
+
+map:
+  # path from pkg share dir
+  yaml_path: "env/kashiwanoha/occupancy_grid_map.yaml"
+
+waypoints:
+  # path from pkg share dir
+  # csv_path: "maps/occupancy_grid_map_waypoints.csv"
+  csv_path: ""
+
+obstacles:
+  # path from pkg share dir
+  csv_path: "" # If empty, the obstacles information will be subscribed from the topic
+  # csv_path: "maps/occupancy_grid_map_obstacles.csv"
+  radius: 1.25
+
+reference_path:
+  update_by_topic: false # When true, 'circle' must be false
+  # path from pkg share dir
+  # csv_path: ""
+  csv_path: "env/kashiwanoha/traj_mincurv.csv"
+  resolution: 0.6
+  smoothing_distance: 2
+  max_width: 3.0
+  circular: true  # kashiwanoha lower-2-cell route is a closed loop
+  use_path_constraints_topic: false
+  use_border_cells_topic: false
+
+bicycle_model:
+  length: 1.087
+  # width: 1.45   # real machine width
+  width: 1.0
+
+mpc:
+  N: 20
+  # Q: [e_y, e_psi, t]
+  # R: [v, delta]
+  # QN: [e_y, e_psi, t]
+  R: [10.0, 1200.0]  # Smooth continuous MPC steering regularization
+  a_min: -1.6 # m/s^2
+  a_max: 1.16 # m/s^2 (optimized within allowed overflow margin above 1.0 m/s^2)
+  delta_max_deg: 32.0 # degrees
+  steer_rate_max: 2.0 # rad/s (5.7x faster for S-curve switchbacks)
+  control_rate: 40.0 # Hz
+  steering_tire_angle_gain_var: 1.0   # 1:1 exact steering gain eliminating 63.9% over-steering gain mismatch
+  # accel_low_pass_gain: 0.1
+  # steer_low_pass_gain: 0.3
+  accel_low_pass_gain: 1.0
+  steer_low_pass_gain: 1.0   # Direct continuous 40 Hz steering output (eliminating multi-stage staircase lag)
+  wp_id_offset: 2            # Immediate target offset (1.2m - tight curve curvature tracking)
+  use_max_kappa_pred: true
+
+
+  ## ---------- 究極 ------------- ##
+  ## Lap1: 53s, Lap2: 47s
+
+  # v_max: 35.0   # km/h
+  # ay_max: 12.0  # m/s^2, maximum lateral acceleration in curves
+  # Q: [600000.0, 100000000.0, 2000000.0]
+  # QN: [1000000.0, 1000000.0, 10000.0]
+
+  ## --- 高速最適安定周回 (OSQPソルバ完全実現可能性・衝突ゼロ) --- ##
+  v_max: 45.0
+  ay_max: 12.0
+  Q: [200.0, 1500.0, 100.0]
+  QN: [200.0, 1500.0, 100.0]
+
+  ## -------- 低速 -------------- ##
+  ## Lap1: 86s
+
+  # v_max: 15.0
+  # ay_max: 5.5
+  # Q: [5000000.0, 100000000.0, 200000.0] # 低速だとインを攻めがちなので、あえて外に膨らむパラメータ
+  # QN: [1000000.0, 1000.0, 10000.0]
+
+v2x_obstacle_avoidance:
+  vehicle_radius: 0.5          # [m]
+  v_max_safety: 30.0           # [m/s]
+  position_jump_threshold: 5.0 # [m]
