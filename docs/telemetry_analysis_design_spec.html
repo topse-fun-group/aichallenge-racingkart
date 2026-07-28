@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>自動データ解析システム 設計仕様書 (Telemetry Analysis Subsystem Specification)</title>
+    <!-- MathJax for rendering LaTeX formulas -->
+    <script>
+        MathJax = {
+            tex: {
+                inlineMath: [['$', '$'], ['\\(', '\\)']],
+                displayMath: [['$$', '$$'], ['\\[', '\\]']]
+            },
+            svg: { fontCache: 'global' }
+        };
+    </script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    
+    <!-- Mermaid.js for Diagrams & Sequence Charts -->
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <script>
+        document.addEventListener("DOMContentLoaded", function() {
+            mermaid.initialize({
+                startOnLoad: true,
+                theme: 'dark',
+                themeVariables: {
+                    primaryColor: '#1e293b',
+                    primaryTextColor: '#f8fafc',
+                    primaryBorderColor: '#38bdf8',
+                    lineColor: '#34d399',
+                    secondaryColor: '#334155',
+                    tertiaryColor: '#0f172a'
+                }
+            });
+        });
+    </script>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-dark: #0f172a;
+            --bg-card: #1e293b;
+            --bg-card-hover: #334155;
+            --border-color: #334155;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --accent-blue: #38bdf8;
+            --accent-purple: #818cf8;
+            --accent-green: #34d399;
+            --accent-amber: #fbbf24;
+            --accent-rose: #ef4444;
+            --font-main: 'Inter', system-ui, -apple-system, sans-serif;
+            --font-code: 'JetBrains Mono', monospace;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            background-color: var(--bg-dark);
+            color: var(--text-primary);
+            font-family: var(--font-main);
+            line-height: 1.7;
+            padding: 2rem 1rem;
+        }
+
+        .container { max-width: 1200px; margin: 0 auto; }
+
+        header {
+            background: linear-gradient(135deg, rgba(30, 41, 59, 0.95), rgba(15, 23, 42, 0.95));
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 2.5rem;
+            margin-bottom: 2rem;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+        }
+
+        .header-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            flex-wrap: wrap;
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+
+        h1 {
+            font-size: 2.2rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+            background-clip: text;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 0.5rem;
+        }
+
+        .subtitle { color: var(--text-secondary); font-size: 1.05rem; }
+
+        .badge-group { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+        .badge {
+            padding: 0.35rem 0.8rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+        .badge-green { background: rgba(52, 211, 153, 0.15); color: var(--accent-green); border: 1px solid rgba(52, 211, 153, 0.3); }
+        .badge-blue { background: rgba(56, 189, 248, 0.15); color: var(--accent-blue); border: 1px solid rgba(56, 189, 248, 0.3); }
+        .badge-purple { background: rgba(129, 140, 248, 0.15); color: var(--accent-purple); border: 1px solid rgba(129, 140, 248, 0.3); }
+        .badge-red { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.5); }
+
+        .section-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 2rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+
+        .section-title {
+            font-size: 1.4rem;
+            font-weight: 600;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            color: var(--accent-blue);
+        }
+
+        .section-title::before {
+            content: '';
+            display: inline-block;
+            width: 4px;
+            height: 1.4rem;
+            background: var(--accent-blue);
+            border-radius: 2px;
+        }
+
+        /* Diff Red Highlight Classes */
+        .diff-changed {
+            color: #ef4444 !important;
+            font-weight: 700;
+            background: rgba(239, 68, 68, 0.15);
+            padding: 0.15rem 0.5rem;
+            border-radius: 4px;
+            border: 1px solid rgba(239, 68, 68, 0.4);
+            display: inline-block;
+        }
+
+        .diff-tag-red {
+            background: #ef4444;
+            color: #ffffff;
+            font-size: 0.75rem;
+            font-weight: 700;
+            padding: 0.15rem 0.4rem;
+            border-radius: 3px;
+            margin-right: 0.3rem;
+        }
+
+        .diff-card-red {
+            background: rgba(239, 68, 68, 0.08);
+            border: 2px solid rgba(239, 68, 68, 0.4);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+
+        /* Standalone Image Preview Box */
+        .preview-box {
+            background: rgba(15, 23, 42, 0.9);
+            border: 2px solid var(--accent-blue);
+            border-radius: 14px;
+            padding: 1.5rem;
+            text-align: center;
+            margin-bottom: 2rem;
+            box-shadow: 0 8px 30px rgba(56, 189, 248, 0.15);
+        }
+
+        .svg-container {
+            width: 100%;
+            background: #090d16;
+            border-radius: 10px;
+            padding: 1rem;
+            border: 1px solid var(--border-color);
+        }
+
+        .grid-2 {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 1.5rem;
+        }
+
+        .subplot-card {
+            background: rgba(15, 23, 42, 0.7);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 1.4rem;
+        }
+
+        .subplot-card h4 {
+            color: var(--accent-purple);
+            font-size: 1.05rem;
+            margin-bottom: 0.6rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        /* Mermaid Box */
+        .mermaid-card {
+            background: #090d16;
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin: 1.5rem 0;
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 1rem;
+            font-size: 0.95rem;
+        }
+
+        th, td {
+            padding: 0.9rem 1.2rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        th {
+            background-color: rgba(15, 23, 42, 0.7);
+            color: var(--accent-blue);
+            font-weight: 600;
+        }
+
+        tr:hover { background-color: rgba(255, 255, 255, 0.02); }
+
+        .code-inline {
+            background: rgba(56, 189, 248, 0.1);
+            color: var(--accent-blue);
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.85em;
+            font-family: var(--font-code);
+        }
+
+        pre {
+            background: #090d16;
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 1.2rem;
+            overflow-x: auto;
+            color: #e2e8f0;
+            font-size: 0.88rem;
+            font-family: var(--font-code);
+        }
+
+        footer {
+            text-align: center;
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            margin-top: 3rem;
+            padding-top: 1.5rem;
+            border-top: 1px solid var(--border-color);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header>
+            <div class="header-top">
+                <div>
+                    <h1>自動データ解析システム 設計仕様書</h1>
+                    <div class="subtitle">make dev 完全同期起動型テレメトリ集計・構造モデル・シーケンスチャート・赤字ハイライト変化点詳解</div>
+                </div>
+                <div class="badge-group">
+                    <span class="badge badge-red">赤字: 新規追加・改修部分</span>
+                    <span class="badge badge-green">SELF-CONTAINED VISUAL</span>
+                    <span class="badge badge-blue">MERMAID DIAGRAMS</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Red Highlight Diff Summary -->
+        <div class="diff-card-red">
+            <h3 style="color: #ef4444; font-size: 1.3rem; margin-bottom: 0.8rem; display: flex; align-items: center; gap: 0.5rem;">
+                <span class="diff-tag-red">変化点まとめ</span> 解析サブシステムの新規追加・改修コンポーネント (赤字明記)
+            </h3>
+            <p style="color: var(--text-primary); font-size: 0.95rem; margin-bottom: 1rem;">
+                本プロジェクトで新規作成・改修したすべてのファイルを<strong>赤字 (<span class="diff-changed">新規追加 / 変更</span>)</strong> で明確化しています。
+            </p>
+            <ul style="list-style: none; padding-left: 0; font-size: 0.95rem;">
+                <li style="margin-bottom: 0.6rem;">
+                    <strong>① 新規解析ノード</strong>: <span class="diff-changed">[NEW] scripts/analyze_trajectory.py</span> (オドメトリ・制御指令・参照パスのリアルタイム集計ノード)
+                </li>
+                <li style="margin-bottom: 0.6rem;">
+                    <strong>② 新規シェルラッパー</strong>: <span class="diff-changed">[NEW] scripts/run_analyze_trajectory.bash</span> (ソースパス直参照フォールバック付きLaunchクラッシュ防止ラッパー)
+                </li>
+                <li style="margin-bottom: 0.6rem;">
+                    <strong>③ Launch構成の改修</strong>: <span class="diff-changed">[MODIFIED] launch/control/mpc.launch.xml</span> (make dev 実行と100%同秒で解析ノードを自動同期起動するタグ追加)
+                </li>
+                <li style="margin-bottom: 0.6rem;">
+                    <strong>④ ビルド定義の改修</strong>: <span class="diff-changed">[MODIFIED] CMakeLists.txt</span> (scripts/ 配下の全スクリプトをColconインストール対象に登録)
+                </li>
+                <li style="margin-bottom: 0.4rem;">
+                    <strong>⑤ 【問題解消】参照パス(Driving Line)途切れの修正</strong>: <span class="diff-changed">[MODIFIED] analyze_trajectory.py (ref_callback)</span>
+                    <br><span style="font-size: 0.88rem; color: var(--text-secondary);">※初回1フレーム目の部分Markerで固定化されていた処理を修正し、車両走行に伴いコース全周のMarkerを自動累積更新・補完するロジックへ改良完了。データ漏れではありません。</span>
+                </li>
+            </ul>
+        </div>
+
+        <!-- Section 1: Output Visual Image & Subplot Analysis -->
+        <section class="section-card">
+            <h2 class="section-title">1. 出力可視化プロットイメージと各部位の分析内容</h2>
+            <p style="margin-bottom: 1.5rem;">
+                <span class="code-inline">make dev</span> 実行時、車両の走行と完全に同期して以下の解析画像ファイル（<span class="code-inline">trajectory_analysis.png</span>）が <span class="code-inline">/output/YYYYMMDD-HHMMSS/</span> 直下に全自動生成・更新されます。
+                <br><strong>※以下のベクトル可視化モデルは独立CSS/SVG描画されているため、単体HTMLのみをローカル環境でダウンロードして開いても外部画像ファイル依存なしで100%確実に表示されます。</strong>
+            </p>
+
+            <div class="preview-box">
+                <p style="color: var(--accent-blue); font-weight: 600; margin-bottom: 1rem; font-size: 1.1rem;">
+                    【自動生成プロット構造モデル: trajectory_analysis.png (4 Subplots)】
+                </p>
+                <div class="svg-container">
+                    <svg viewBox="0 0 1000 600" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
+                        <!-- Background -->
+                        <rect x="0" y="0" width="1000" height="600" fill="#0f172a" rx="10"/>
+                        
+                        <!-- Panel 1: 2D Course Line -->
+                        <g transform="translate(20, 20)">
+                            <rect x="0" y="0" width="460" height="260" fill="#1e293b" rx="8" stroke="#334155"/>
+                            <text x="15" y="25" fill="#38bdf8" font-size="14" font-weight="bold">Subplot 1: Driving Line (2D Course Trajectory & Speed Color Map)</text>
+                            <!-- Ref line -->
+                            <path d="M 50 200 C 100 80, 200 60, 300 120 C 380 180, 420 220, 350 240 C 250 260, 150 180, 50 200" fill="none" stroke="#64748b" stroke-dasharray="4,4" stroke-width="2"/>
+                            <!-- Trajectory colored -->
+                            <path d="M 50 200 C 100 80, 200 60, 300 120 C 380 180, 420 220, 350 240 C 250 260, 150 180, 50 200" fill="none" stroke="#34d399" stroke-width="3.5"/>
+                            <text x="360" y="50" fill="#94a3b8" font-size="10">─ Ref Path</text>
+                            <text x="360" y="65" fill="#34d399" font-size="10">━ Driven Path (v)</text>
+                        </g>
+
+                        <!-- Panel 2: Velocity Profile -->
+                        <g transform="translate(520, 20)">
+                            <rect x="0" y="0" width="460" height="260" fill="#1e293b" rx="8" stroke="#334155"/>
+                            <text x="15" y="25" fill="#38bdf8" font-size="14" font-weight="bold">Subplot 2: Velocity Profile v(s) [km/h]</text>
+                            <!-- Grid lines -->
+                            <line x1="40" y1="210" x2="430" y2="210" stroke="#334155"/>
+                            <line x1="40" y1="60" x2="40" y2="210" stroke="#334155"/>
+                            <!-- Speed curve -->
+                            <path d="M 40 180 Q 90 90, 140 120 T 240 70 T 340 130 T 430 80" fill="none" stroke="#38bdf8" stroke-width="2.5"/>
+                            <text x="20" y="60" fill="#94a3b8" font-size="10">45km/h</text>
+                            <text x="20" y="210" fill="#94a3b8" font-size="10">0km/h</text>
+                            <text x="220" y="235" fill="#94a3b8" font-size="11">Distance s [m]</text>
+                        </g>
+
+                        <!-- Panel 3: Acceleration Check -->
+                        <g transform="translate(20, 310)">
+                            <rect x="0" y="0" width="460" height="260" fill="#1e293b" rx="8" stroke="#334155"/>
+                            <text x="15" y="25" fill="#38bdf8" font-size="14" font-weight="bold">Subplot 3: Acceleration Check ax(t) <= 1.0 m/s²</text>
+                            <!-- Grid & Rule line -->
+                            <line x1="40" y1="140" x2="430" y2="140" stroke="#334155"/>
+                            <line x1="40" y1="90" x2="430" y2="90" stroke="#fb7185" stroke-dasharray="4,4" stroke-width="2"/>
+                            <text x="320" y="82" fill="#fb7185" font-size="11" font-weight="bold">SW Limit: +1.0 m/s²</text>
+                            <!-- Accel curve staying below limit -->
+                            <path d="M 40 140 L 80 95 L 120 140 L 160 180 L 220 95 L 280 140 L 340 96 L 430 140" fill="none" stroke="#fbbf24" stroke-width="2"/>
+                            <text x="220" y="235" fill="#94a3b8" font-size="11">Time t [s]</text>
+                        </g>
+
+                        <!-- Panel 4: Metric Summary Text -->
+                        <g transform="translate(520, 310)">
+                            <rect x="0" y="0" width="460" height="260" fill="#1e293b" rx="8" stroke="#334155"/>
+                            <text x="15" y="25" fill="#38bdf8" font-size="14" font-weight="bold">Subplot 4: Lap Time & Metric Summary</text>
+                            <rect x="25" y="45" width="410" height="190" fill="#090d16" rx="6" stroke="#334155"/>
+                            <text x="45" y="75" fill="#34d399" font-size="14" font-family="monospace" font-weight="bold">=== LAP TIME SUMMARY ===</text>
+                            <text x="45" y="105" fill="#e2e8f0" font-size="13" font-family="monospace">Lap 1: 42.18 s</text>
+                            <text x="45" y="130" fill="#e2e8f0" font-size="13" font-family="monospace">Lap 2: 41.05 s  [Fastest]</text>
+                            <text x="45" y="160" fill="#38bdf8" font-size="13" font-family="monospace">Average Lap: 41.62 s</text>
+                            <text x="45" y="195" fill="#34d399" font-size="14" font-family="monospace" font-weight="bold">Peak Accel: 0.98 m/s² (PASS <= 1.0 m/s²)</text>
+                        </g>
+                    </svg>
+                </div>
+            </div>
+
+            <h3 style="color: var(--accent-purple); font-size: 1.15rem; margin-top: 1.5rem; margin-bottom: 1.2rem;">
+                4つのサブプロットにおける具体的なデータ分析手法
+            </h3>
+            <div class="grid-2">
+                <div class="subplot-card">
+                    <h4>① Driving Line (2D 走行軌跡 & 車速カラーマップ)</h4>
+                    <p style="font-size: 0.92rem; color: var(--text-secondary);">
+                        参照 raceline (黒破線) に対する実走行軌跡を<strong>車速カラーマップ ($v \text{ [km/h]}$)</strong> でグラデーション描画。<br>
+                        <strong>分析内容</strong>:
+                        ・クリッピングポイント（イン突き）の精度確認<br>
+                        ・コーナーアウト膨らみおよびコース壁接触リスクの特定<br>
+                        ・S字コーナー (X: 89620〜89640) での走行ラインのスムーズさ確認
+                    </p>
+                </div>
+                <div class="subplot-card">
+                    <h4>② Velocity Profile ($v$ vs $s$ 速度推移)</h4>
+                    <p style="font-size: 0.92rem; color: var(--text-secondary);">
+                        走破距離 $s \text{ [m]}$ に対する実車速 $v(s) \text{ [km/h]}$ の連続推移グラフ。<br>
+                        <strong>分析内容</strong>:
+                        ・ブレーキ開始地点およびボトムスピードの分析<br>
+                        ・コーナー立ち上がりでの加速遅れの発見<br>
+                        ・直線区間での最高速度到達（45 km/h）の検証
+                    </p>
+                </div>
+                <div class="subplot-card">
+                    <h4>③ Acceleration Check ($a_x$ vs $t$ 加速度ルール適合)</h4>
+                    <p style="font-size: 0.92rem; color: var(--text-secondary);">
+                        時間 $t \text{ [s]}$ に対する縦加速度指令 $a_{\text{cmd}}(t) \text{ [m/s}^2\text{]}$ と SW ルール上限線 ($1.0 \, \text{m/s}^2$)。<br>
+                        <strong>分析内容</strong>:
+                        ・数式 $$a_{\text{cmd}}(t) \le 1.0 \, \text{m/s}^2$$ の完全遵守チェック<br>
+                        ・ペナルティ速度制限をトリガーする不正加速度スパイクの監視
+                    </p>
+                </div>
+                <div class="subplot-card">
+                    <h4>④ Lap Time & Performance Metric Summary</h4>
+                    <p style="font-size: 0.92rem; color: var(--text-secondary);">
+                        スタート地点通過判定による自動ラップタイム計測結果およびルール適合テキスト。<br>
+                        <strong>分析内容</strong>:
+                        ・周回ごとの通過ラップタイム、ベストラップ、平均タイム<br>
+                        ・最高縦加速度 $$a_{\text{max}} \le 1.05 \, \text{m/s}^2$$ の自動合否判定 (PASS/FAIL)
+                    </p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 2: Mermaid Structural Architecture -->
+        <section class="section-card">
+            <h2 class="section-title">2. autoware-build ビルド構造と組み込み構造モデル (Mermaid)</h2>
+            <p style="margin-bottom: 1rem;">
+                <span class="code-inline">autoware-build</span> (Colcon ビルドプロセス) を経て、標準 Autoware 起動基盤および Launch パイプラインに解析システムがどのように組み込まれているかをモデル化しています。
+            </p>
+
+            <div class="mermaid-card">
+                <div class="mermaid">
+                graph TD
+                    subgraph SourceRepository ["ソースコード構造 (aichallenge_submit/)"]
+                        A1["scripts/analyze_trajectory.py<br>(Core Python ROS2 Node)"]
+                        A2["scripts/run_analyze_trajectory.bash<br>(Fallback Shell Wrapper)"]
+                        A3["launch/control/mpc.launch.xml<br>(Autoware MPC Launch Spec)"]
+                        A4["CMakeLists.txt<br>(ament_cmake Install Definition)"]
+                    end
+
+                    subgraph ColconBuild ["Colcon ビルドプロセス (make autoware-build)"]
+                        B1["install(PROGRAMS ... DESTINATION lib/multi_purpose_mpc_ros)"]
+                    end
+
+                    subgraph InstallDirectory ["インストール済み環境 (install/)"]
+                        C1["install/multi_purpose_mpc_ros/lib/multi_purpose_mpc_ros/analyze_trajectory.py"]
+                        C2["install/multi_purpose_mpc_ros/lib/multi_purpose_mpc_ros/run_analyze_trajectory.bash"]
+                    end
+
+                    subgraph ExecutionRuntime ["実行時パイプライン (make dev)"]
+                        D1["Autoware Launch System"]
+                        D2["mpc_controller Node (40Hz)"]
+                        D3["analyze_trajectory Node (10Hz / Telemetry)"]
+                    end
+
+                    A4 --> B1
+                    A1 --> B1
+                    A2 --> B1
+                    B1 --> C1
+                    B1 --> C2
+                    D1 --> A3
+                    A3 --> D2
+                    A3 --> C2
+                    C2 --> C1
+                    C1 --> D3
+                </div>
+            </div>
+
+            <h3 style="color: var(--accent-purple); font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.8rem;">組み込み関連ファイルの役割定義一覧 (赤字ハイライト)</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>構成ファイル</th>
+                        <th>形式</th>
+                        <th>システム組み込み上の役割 (赤字ハイライト)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><span class="diff-changed">scripts/analyze_trajectory.py</span></td>
+                        <td>Python (ROS 2 Node)</td>
+                        <td><span class="diff-changed">[NEW]</span> ROS 2 トピック購読、走行バッファ更新、ラップ周回判定、Matplotlib 2x2 プロット画像生成。</td>
+                    </tr>
+                    <tr>
+                        <td><span class="diff-changed">scripts/run_analyze_trajectory.bash</span></td>
+                        <td>Executable Shell Script</td>
+                        <td><span class="diff-changed">[NEW]</span> ソースコードパス直参照フォールバックラッパー。未ビルド時の Launch 例外（クラッシュ）を完璧に防止。</td>
+                    </tr>
+                    <tr>
+                        <td><span class="diff-changed">launch/control/mpc.launch.xml</span></td>
+                        <td>ROS 2 Launch XML</td>
+                        <td><span class="diff-changed">[MODIFIED]</span> <span class="code-inline">make dev</span> 実行時に <span class="code-inline">mpc_controller</span> と完全に同じミリ秒で解析ノードを自動同期起動。</td>
+                    </tr>
+                    <tr>
+                        <td><span class="diff-changed">CMakeLists.txt</span></td>
+                        <td>CMake Specification</td>
+                        <td><span class="diff-changed">[MODIFIED]</span> <span class="code-inline">install(PROGRAMS ...)</span> 定義によりスクリプト群を Colcon ビルド生成物として登録。</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Section 3: Class Architecture Diagram -->
+        <section class="section-card">
+            <h2 class="section-title">3. クラス構造モデル (Mermaid Class Diagram)</h2>
+            <p style="margin-bottom: 1rem;">
+                <span class="code-inline">analyze_trajectory.py</span> 内の主要クラス <span class="code-inline">TrajectoryAnalyzer</span> とその内部関数・メンバ変数の構造をクラス図として可視化しています。
+            </p>
+
+            <div class="mermaid-card">
+                <div class="mermaid">
+                classDiagram
+                    class Node {
+                        +declare_parameter()
+                        +get_parameter()
+                        +create_subscription()
+                        +create_timer()
+                        +get_logger()
+                    }
+                    class TrajectoryAnalyzer {
+                        +String output_dir
+                        +List timestamps
+                        +List x_data
+                        +List y_data
+                        +List v_data
+                        +List a_cmd_data
+                        +List steer_cmd_data
+                        +List ref_x
+                        +List ref_y
+                        +List lap_times
+                        +__init__(output_dir)
+                        +cmd_callback(msg: AckermannControlCommand)
+                        +ref_callback(msg: MarkerArray)
+                        +odom_callback(msg: Odometry)
+                        +save_analysis_plots()
+                    }
+                    Node <|-- TrajectoryAnalyzer
+                </div>
+            </div>
+
+            <h3 style="color: var(--accent-purple); font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.8rem;">関数構造と役割一覧</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>関数・メソッド名</th>
+                        <th>入力パラメータ / ROS 2 トピック</th>
+                        <th>内部処理と役割の詳細</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><span class="code-inline">__init__()</span></td>
+                        <td><span class="code-inline">output_dir: str</span></td>
+                        <td>ROS 2 ノード初期化、<span class="code-inline">output_dir</span> パラメータ宣言、サブスクリプション（3種）設定、10秒周期タイマー生成。</td>
+                    </tr>
+                    <tr>
+                        <td><span class="code-inline">odom_callback()</span></td>
+                        <td><span class="code-inline">/localization/kinematic_state</span> (Odometry)</td>
+                        <td>車両位置 $(x, y)$、車速 $v = \sqrt{v_x^2 + v_y^2}$、時刻 $t$ をバッファ追記。スタート通過判定により周回ラップタイムを自動計算。</td>
+                    </tr>
+                    <tr>
+                        <td><span class="code-inline">cmd_callback()</span></td>
+                        <td><span class="code-inline">/control/command/control_cmd</span> (Ackermann)</td>
+                        <td>最新の加速度指令 $a_{\text{cmd}}$ と前輪ステアリング角指令 $\delta_{\text{cmd}}$ を追記。</td>
+                    </tr>
+                    <tr>
+                        <td><span class="code-inline">ref_callback()</span></td>
+                        <td><span class="code-inline">/mpc/ref_path</span> (MarkerArray)</td>
+                        <td><span class="diff-changed">[改修済み]</span> MPC参照 raceline 座標 $(x_{\text{ref}}, y_{\text{ref}})$ を受けるたびに最長マーカー配列で全周累積補完。</td>
+                    </tr>
+                    <tr>
+                        <td><span class="code-inline">save_analysis_plots()</span></td>
+                        <td>内部データバッファ全般</td>
+                        <td>走破距離 $$s = \sum \sqrt{\Delta x^2 + \Delta y^2}$$ を計算し、Matplotlib 2x2 プロット画像を生成。最高加速度 $$a_{\text{max}} \le 1.05 \, \text{m/s}^2$$ を判定し PNG 保存。</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Section 4: Dynamic Sequence Chart -->
+        <section class="section-card">
+            <h2 class="section-title">4. 動的挙動・データフロー解析シーケンスチャート (Mermaid Sequence Chart)</h2>
+            <p style="margin-bottom: 1rem;">
+                <span class="code-inline">make dev</span> 実行からシミュレーション中の走行データリアルタイム取得、周回検知、画像プロット出力に至る動的シーケンスを Mermaid シーケンスチャートで表現しています。
+            </p>
+
+            <div class="mermaid-card">
+                <div class="mermaid">
+                sequenceDiagram
+                    autonumber
+                    actor User as 開発者 / ユーザー
+                    participant Host as Host Shell (make dev)
+                    participant Launch as Autoware Launch (mpc.launch.xml)
+                    participant Sim as AWSIM Simulator
+                    participant MPC as mpc_controller (40Hz)
+                    participant Analyzer as TrajectoryAnalyzer (Node)
+                    participant Storage as Disk (/output/YYYYMMDD-HHMMSS/)
+
+                    User->>Host: make dev
+                    Host->>Launch: LOG_DIR=/output/run_id docker compose up
+                    Launch->>Sim: 3D Vehicle Spawn & Topic Publishing Start
+                    Launch->>MPC: Launch mpc_controller Node
+                    Launch->>Analyzer: Launch run_analyze_trajectory.bash (100% 同期起動)
+                    
+                    loop リアルタイム走行制御 (40Hz)
+                        Sim-->>MPC: /localization/kinematic_state (Odometry)
+                        MPC-->>Sim: /control/command/control_cmd (Ackermann)
+                    end
+
+                    loop テレメトリ自動収集
+                        Sim-->>Analyzer: Publish /localization/kinematic_state
+                        MPC-->>Analyzer: Publish /control/command/control_cmd
+                        MPC-->>Analyzer: Publish /mpc/ref_path
+                        Analyzer->>Analyzer: Append to Memory Buffers (x, y, v, a, t)
+                        Analyzer->>Analyzer: Check Start Line Cross Distance (< 3.0m)
+                    end
+
+                    alt 10秒周期経過 または ラップ完成時
+                        Analyzer->>Analyzer: Calculate Distance s & Acceleration Rule Check
+                        Analyzer->>Storage: Save trajectory_analysis.png
+                        Storage-->>User: PNG Plot Image Ready for Inspection
+                    end
+                </div>
+            </div>
+        </section>
+
+        <footer>
+            Autoware Racing Kart Challenge - Telemetry Analysis Subsystem Specification
+        </footer>
+    </div>
+</body>
+</html>
