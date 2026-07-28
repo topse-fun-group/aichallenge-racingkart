@@ -1,5 +1,6 @@
 #!/bin/bash
 # shellcheck disable=SC1091
+source "$(ros2 pkg prefix multi_purpose_mpc_ros)/.venv/bin/activate"
 if ! /usr/bin/python3 -c "import skimage" 2>/dev/null; then
     /usr/bin/python3 -m pip install --no-cache-dir scikit-image pandas >/dev/null 2>&1 || true
 fi
