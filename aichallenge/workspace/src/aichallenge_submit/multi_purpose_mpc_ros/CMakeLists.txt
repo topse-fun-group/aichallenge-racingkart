@@ -28,10 +28,6 @@ ament_python_install_package(${PROJECT_NAME}
   SCRIPTS_DESTINATION lib/${PROJECT_NAME}
 )
 
-install(DIRECTORY multi_purpose_mpc_ros
-  DESTINATION lib/python3.10/site-packages
-)
-
 install(PROGRAMS
   scripts/run_mpc_controller.bash
   scripts/run_mpc_simulation.bash
@@ -49,9 +45,18 @@ install(PROGRAMS
   DESTINATION lib/${PROJECT_NAME}
 )
 
-# install python dependencies in install directory site-packages
+# create python virtual environment
 execute_process(
-    COMMAND /usr/bin/python3 -m pip install --target ${CMAKE_INSTALL_PREFIX}/lib/python3.10/site-packages -r ./resources/requirements.txt
+  COMMAND /usr/bin/python3 -m venv ${CMAKE_INSTALL_PREFIX}/.venv
+  RESULT_VARIABLE venv_result
+)
+if(venv_result)
+    message(FATAL_ERROR "Failed to create virtual environment")
+endif()
+
+# install python dependencies in virtual environment
+execute_process(
+    COMMAND ${CMAKE_INSTALL_PREFIX}/.venv/bin/pip install -r ./resources/requirements.txt
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     RESULT_VARIABLE install_result
 )
@@ -59,7 +64,9 @@ if(install_result)
     message(FATAL_ERROR "Failed to install python dependencies in virtual environment")
 endif()
 
-ament_auto_package(INSTALL_TO_SHARE
+ament_auto_package(
+  USE_SCOPED_HEADER_INSTALL_DIR
+  INSTALL_TO_SHARE
   config
   launch
   env

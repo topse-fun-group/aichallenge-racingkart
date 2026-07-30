@@ -24,6 +24,7 @@ tqdm
 hydra-core
 omegaconf
 scikit-learn
+scikit-image
 ultralytics
 pyproj
 pycocotools
