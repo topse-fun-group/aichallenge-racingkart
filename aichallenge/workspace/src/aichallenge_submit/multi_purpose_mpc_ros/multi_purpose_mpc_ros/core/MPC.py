@@ -84,6 +84,9 @@ class MPC:
         """
         Initialize optimization problem for current time step with steering rate constraints.
         """
+        # reset dynamic constraints
+        if self.use_obstacle_avoidance and not self.use_path_constraints_topic:
+            self.model.reference_path.reset_dynamic_constraints()
         # 既存の制約設定
         umin = self.input_constraints['umin']
         umax = self.input_constraints['umax']
@@ -134,25 +137,29 @@ class MPC:
             ur[n*self.nu:(n+1)*self.nu] = [v_ref, kappa_ref]
             uq[n * self.nx:(n+1)*self.nx] = B_lin.dot([v_ref, kappa_ref]) - f
 
-            # Constrain maximum speed based on curvature
-            if self.use_max_kappa_pred:
-                max_kappa_pred = np.max(np.abs(kappa_pred[n:]))
-                vmax_dyn = np.sqrt(self.ay_max / (np.abs(max_kappa_pred) + 1e-12))
-            else:
-                vmax_dyn = np.sqrt(self.ay_max / (np.abs(kappa_pred[n]) + 1e-12))
+            # Constrain maximum speed based on road curvature
+            vmax_dyn = np.sqrt(self.ay_max / (np.abs(kappa_ref) + 1e-6))
             umax_dyn[self.nu*n] = min(vmax_dyn, umax_dyn[self.nu*n])
 
         # Update path constraints
-        if self.use_obstacle_avoidance and not self.use_path_constraints_topic:
+        if self.use_obstacle_avoidance and not self.use_path_constraints_topic and len(self.model.reference_path.map.obstacles) > 0:
             ub, lb, _ = self.model.reference_path.update_path_constraints(
                 self.model.wp_id + 1,
                 [self.model.temporal_state.x, self.model.temporal_state.y, self.model.temporal_state.psi],
                 N, self.model.length, self.model.width, safety_margin)
         else:
-            ref_wp_id = (self.model.wp_id + 1) % len(self.model.reference_path.path_constraints[0])
-            ub = self.model.reference_path.path_constraints[0][ref_wp_id]
-            lb = self.model.reference_path.path_constraints[1][ref_wp_id]
-            self.model.reference_path.border_cells.current_wp_id = ref_wp_id
+            if self.model.reference_path.path_constraints is not None:
+                ref_wp_id = (self.model.wp_id + 1) % len(self.model.reference_path.path_constraints[0])
+                ub = self.model.reference_path.path_constraints[0][ref_wp_id]
+                lb = self.model.reference_path.path_constraints[1][ref_wp_id]
+                self.model.reference_path.border_cells.current_wp_id = ref_wp_id
+            else:
+                # path_constraints not set: use static waypoint ub_sm/lb_sm bounds
+                # (already have safety margin applied via reset_dynamic_constraints)
+                wps = self.model.reference_path.waypoints
+                n_wps = len(wps)
+                ub = np.array([wps[(self.model.wp_id + 1 + i) % n_wps].ub_sm for i in range(N)])
+                lb = np.array([wps[(self.model.wp_id + 1 + i) % n_wps].lb_sm for i in range(N)])
 
             # Update safety margin if provided as argument and different from current value
             if self.model.safety_margin != safety_margin:
@@ -164,10 +171,31 @@ class MPC:
                 ub[infeasible_index] = 0.0
                 lb[infeasible_index] = 0.0
 
+        e_y0 = self.model.spatial_state.e_y
+
+        # If initial state e_y0 is outside nominal corridor (e.g. startup offset or eval mode start),
+        # smoothly relax bounds over first 5 horizon steps so vehicle can steer back in without OSQP infeasibility.
+        for n in range(N):
+            margin = 0.5
+            if e_y0 < lb[n]:
+                decay = max(0.0, (5 - n) / 5.0)
+                lb[n] = (1.0 - decay) * lb[n] + decay * (e_y0 - margin)
+            elif e_y0 > ub[n]:
+                decay = max(0.0, (5 - n) / 5.0)
+                ub[n] = (1.0 - decay) * ub[n] + decay * (e_y0 + margin)
+
         # Update dynamic state constraints
-        xmin_dyn[0] = xmax_dyn[0] = self.model.spatial_state.e_y
         xmin_dyn[self.nx::self.nx] = lb
         xmax_dyn[self.nx::self.nx] = ub
+        xmin_dyn[0] = xmax_dyn[0] = e_y0
+
+        # [DEBUG] print first call diagnostics
+        if self.infeasibility_counter == 0:
+            print(f'[MPC_DBG] wp_id={self.model.wp_id} e_y0={e_y0:.4f} '
+                  f'ub[0]={float(ub[0] if hasattr(ub,"__len__") else ub):.4f} '
+                  f'lb[0]={float(lb[0] if hasattr(lb,"__len__") else lb):.4f} '
+                  f'N={N} lb_shape={getattr(lb,"shape","scalar")} ub_shape={getattr(ub,"shape","scalar")}')
+
         xr[self.nx::self.nx] = (lb + ub) / 2
 
         # Get equality matrix
@@ -249,21 +277,23 @@ class MPC:
 
         try:
             dec = self.optimizer.solve()
-            control_signals = np.array(dec.x[-N*nu:])
-            use_control_signals = control_signals[1::2]
-
-            if not np.all(use_control_signals):
+            if dec.info.status != 'solved':
+                print(f'[MPC] OSQP initial solve failed: status={dec.info.status}')
                 for i in range(1, 6):
                     relaxed_safety_margin = self.model.safety_margin * ((5-i) / 5.0)
                     self._init_problem(N, relaxed_safety_margin)
                     dec = self.optimizer.solve()
-                    control_signals = np.array(dec.x[-N*nu:])
-                    use_control_signals = control_signals[1::2]
 
-                    if self.infeasibility_counter == 0 and np.all(use_control_signals):
-                        if self.last_solved_wp_id != self.model.wp_id:
-                            print(f"Relaxed safety margin by {relaxed_safety_margin} ({5-i}/5) to solve the problem")
+                    if dec.info.status == 'solved':
+                        if self.infeasibility_counter == 0:
+                            if self.last_solved_wp_id != self.model.wp_id:
+                                print(f"Relaxed safety margin by {relaxed_safety_margin} ({5-i}/5) to solve the problem")
                         break
+                else:
+                    raise TypeError('OSQP solve failed after relaxation')
+
+            control_signals = np.array(dec.x[-N*nu:])
+            use_control_signals = control_signals[1::2]
 
             # ステア角の計算と保存
             control_signals[1::2] = np.arctan(control_signals[1::2] * self.model.length)
@@ -292,7 +322,11 @@ class MPC:
             self.infeasibility_counter = 0
             self.last_solved_wp_id = self.model.wp_id
 
-        except TypeError or ValueError:
+        except (TypeError, ValueError) as e:
+            import traceback
+            if self.infeasibility_counter == 0:
+                print(f'[MPC] Exception in get_control: {type(e).__name__}: {e}')
+                traceback.print_exc()
             id = nu * (self.infeasibility_counter + 1)
             if id + 2 < len(self.current_control):
                 u = np.array(self.current_control[id:id+2])

@@ -26,6 +26,15 @@ esac
 
 export ROS_DOMAIN_ID=$id
 
+export PYTHONPATH="/tmp/.local/lib/python3.10/site-packages:${PYTHONPATH}"
+source /opt/ros/humble/setup.bash
+source /autoware/install/setup.bash
+if [ -f /aichallenge/workspace/install/setup.bash ]; then
+    source /aichallenge/workspace/install/setup.bash
+elif [ -f /aichallenge/workspace/install/local_setup.bash ]; then
+    source /aichallenge/workspace/install/local_setup.bash
+fi
+
 mkdir -p "${out_dir}"
 exec >"${out_dir}/autoware.log" 2>&1
 

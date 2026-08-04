@@ -23,7 +23,8 @@ SimplePurePursuit::SimplePurePursuit()
   speed_proportional_gain_(declare_parameter<float>("speed_proportional_gain", 1.0)),
   use_external_target_vel_(declare_parameter<bool>("use_external_target_vel", false)),
   external_target_vel_(declare_parameter<float>("external_target_vel", 0.0)),
-  steering_tire_angle_gain_(declare_parameter<float>("steering_tire_angle_gain", 1.0))
+  steering_tire_angle_gain_(declare_parameter<float>("steering_tire_angle_gain", 1.0)),
+  speed_scale_factor_(declare_parameter<float>("speed_scale_factor", 1.0))
 {
   pub_cmd_ = create_publisher<AckermannControlCommand>("output/control_cmd", 1);
   pub_raw_cmd_ = create_publisher<AckermannControlCommand>("output/raw_control_cmd", 1);
@@ -69,12 +70,12 @@ void SimplePurePursuit::onTimer()
 
   // calc longitudinal speed and acceleration
   double target_longitudinal_vel =
-    use_external_target_vel_ ? external_target_vel_ : closet_traj_point.longitudinal_velocity_mps;
+    (use_external_target_vel_ ? external_target_vel_ : closet_traj_point.longitudinal_velocity_mps) * speed_scale_factor_;
   double current_longitudinal_vel = odometry_->twist.twist.linear.x;
 
   cmd.longitudinal.speed = target_longitudinal_vel;
-  cmd.longitudinal.acceleration =
-    speed_proportional_gain_ * (target_longitudinal_vel - current_longitudinal_vel);
+  double accel = speed_proportional_gain_ * (target_longitudinal_vel - current_longitudinal_vel);
+  cmd.longitudinal.acceleration = std::max(-1.6, std::min(1.0, accel));
 
   // calc lateral control
   //// calc lookahead distance

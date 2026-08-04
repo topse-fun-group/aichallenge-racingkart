@@ -129,7 +129,7 @@
 
       <!-- Customizable -->
       <node pkg="simple_trajectory_generator" exec="simple_trajectory_generator_node" name="simple_trajectory_generator" output="screen">
-            <param name="csv_path" value="$(find-pkg-share simple_trajectory_generator)/data/$(var track_subdir)raceline_awsim_30km_from_garage.csv"/>
+            <param name="csv_path" value="$(find-pkg-share simple_trajectory_generator)/data/$(var track_subdir)raceline_cctb_30km_wide_from_garage_safechicane.csv"/>
             <param name="z" value="6.5"/>
       </node>
       
@@ -148,6 +148,8 @@
     <include file="$(find-pkg-share aichallenge_submit_launch)/launch/control/mpc.launch.xml">
       <arg name="use_sim_time" value="$(var use_sim_time)"/>
       <arg name="track" value="$(var track)"/>
+      <arg name="vehicle_id" value="$(var vehicle_id)"/>
+      <arg name="use_obstacle_avoidance" value="true"/>
     </include>
   </group>
 

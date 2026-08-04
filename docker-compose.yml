@@ -99,24 +99,24 @@ services:
   # Autoware service
   autoware:
     <<: *autoware-base
-    command: ["bash", "-lc", "exec /aichallenge/run_autoware.bash ${RUN_MODE:-awsim} ${ROS_DOMAIN_ID:-1} ${LOG_DIR:-}"]
+    command: [ "bash", "-lc", "exec /aichallenge/run_autoware.bash ${RUN_MODE:-awsim} ${ROS_DOMAIN_ID:-1} ${LOG_DIR:-}" ]
 
   # Autoware service
   autoware-build:
-    <<: *autoware-base 
-    command: ["bash", "-lc", "exec /aichallenge/build_autoware.bash ${HOST_UID:-} ${HOST_GID:-}"]
+    <<: *autoware-base
+    command: [ "bash", "-lc", "exec /aichallenge/build_autoware.bash ${HOST_UID:-} ${HOST_GID:-}" ]
 
   simulator:
-    <<: *autoware-base 
-    command: ["bash", "-lc", "exec /aichallenge/run_simulator.bash"]
+    <<: *autoware-base
+    command: [ "bash", "-lc", "exec /aichallenge/run_simulator.bash" ]
 
   autoware-command:
     <<: *autoware-base
-    command: ["bash", "-lc", "cd ${CMD_WORKDIR:-/aichallenge} && exec bash -lc \"${CMD:-}\""]
+    command: [ "bash", "-lc", "cd ${CMD_WORKDIR:-/aichallenge} && exec bash -lc \"${CMD:-}\"" ]
 
   rosbag:
     <<: *autoware-rosbag-base
-    command: ["bash", "-lc", 'exec /aichallenge/utils/record_all_rosbag.bash "${ROS_DOMAIN_ID:-1}" "${LOG_DIR:-}" "${RACING_KART_INTERFACE_DIR:-/home/tier4/racing_kart_interface}"']
+    command: [ "bash", "-lc", 'exec /aichallenge/utils/record_all_rosbag.bash "${ROS_DOMAIN_ID:-1}" "${LOG_DIR:-}" "${RACING_KART_INTERFACE_DIR:-/home/tier4/racing_kart_interface}"' ]
 
   autoware-simulator-evaluation:
     <<: *autoware-base
@@ -130,22 +130,22 @@ services:
       - ${XAUTHORITY:-/dev/null}:${XAUTHORITY:-/dev/null}:rw
       - /etc/passwd:/etc/passwd:ro
       - /etc/group:/etc/group:ro
-    command: ["bash", "-lc", "exec /aichallenge/run_evaluation.bash"]
+    command: [ "bash", "-lc", "exec /aichallenge/run_evaluation.bash" ]
 
-#### vehicle specific services can be added here ####
+  #### vehicle specific services can be added here ####
   # Zenoh service
   zenoh:
     <<: *autoware-base
     working_dir: /vehicle
-    command: ["bash", "-lc", "exec /vehicle/run_zenoh.bash ${VEHICLE_ID:-} ${ROS_DOMAIN_ID:-1} ${LOG_DIR:-}"]
+    command: [ "bash", "-lc", "exec /vehicle/run_zenoh.bash ${VEHICLE_ID:-} ${ROS_DOMAIN_ID:-1} ${LOG_DIR:-}" ]
 
   # Driver service
   driver:
     <<: *racing_kart_interface-base
     entrypoint: []
-    command: ["bash", "-lc", "exec /vehicle/run_driver.bash vehicle ${ROS_DOMAIN_ID:-1} ${LOG_DIR:-}"]
+    command: [ "bash", "-lc", "exec /vehicle/run_driver.bash vehicle ${ROS_DOMAIN_ID:-1} ${LOG_DIR:-}" ]
 
-#### remote visualization services ####
+  #### remote visualization services ####
   rviz2:
-    <<: *autoware-base 
-    command: ["bash", "-lc", "exec /aichallenge/utils/run_rviz.bash remote"]
+    <<: *autoware-base
+    command: [ "bash", "-lc", "exec /aichallenge/utils/run_rviz.bash remote" ]

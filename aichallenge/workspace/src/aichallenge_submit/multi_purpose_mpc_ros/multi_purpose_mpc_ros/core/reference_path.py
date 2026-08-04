@@ -732,8 +732,9 @@ class ReferencePath:
 
                 # Check feasibility of the path after subtracting safety margin
                 if ub_sm < lb_sm:
-                    ub_sm = 0.0
-                    lb_sm = 0.0
+                    mid = (wp.ub + wp.lb) / 2.0
+                    ub_sm = mid + 0.1
+                    lb_sm = mid - 0.1
 
                 # wp.ub_sm = ub_sm
                 # wp.lb_sm = lb_sm
@@ -776,8 +777,9 @@ class ReferencePath:
 
             # Check feasibility of the path after subtracting safety margin
             if ub_sm < lb_sm:
-                ub_sm = 0.0
-                lb_sm = 0.0
+                mid = (wp.ub + wp.lb) / 2.0
+                ub_sm = mid + 0.1
+                lb_sm = mid - 0.1
 
             # Compute absolute angle of bound cell
             angle_ub = np.mod(math.pi / 2 + wp.psi + math.pi,
@@ -797,8 +799,9 @@ class ReferencePath:
             dynamic_lower_bounds.append(lb_sm_ls)
 
         # Set dynamic bounds for show plot
-        self.border_cells.dynamic_upper_bounds[wp_id] = np.array(dynamic_upper_bounds).reshape(N, 2)
-        self.border_cells.dynamic_lower_bounds[wp_id] = np.array(dynamic_lower_bounds).reshape(N, 2)
+        if hasattr(self, 'border_cells') and hasattr(self.border_cells, 'dynamic_upper_bounds') and len(self.border_cells.dynamic_upper_bounds) > wp_id:
+            self.border_cells.dynamic_upper_bounds[wp_id] = np.array(dynamic_upper_bounds).reshape(N, 2)
+            self.border_cells.dynamic_lower_bounds[wp_id] = np.array(dynamic_lower_bounds).reshape(N, 2)
 
         return np.array(upper_bounds), np.array(lower_bounds)
 
@@ -863,10 +866,9 @@ class ReferencePath:
 
             # Check feasibility of the path after subtracting safety margin
             if ub_sm < lb_sm:
-                # 一つ前のifの判定でboundsは正常になっているはずなので、こちらの判定に入る場合は何らかの実装上の異常がある
-                print("!!!! Infeasible path detected !!!!")
-                ub_sm = 0.0
-                lb_sm = 0.0
+                mid = (ub + lb) / 2.0
+                ub_sm = mid + 0.1
+                lb_sm = mid - 0.1
 
             # Compute absolute angle of bound cell
             angle_ub = np.mod(math.pi / 2 + wp.psi + math.pi,
