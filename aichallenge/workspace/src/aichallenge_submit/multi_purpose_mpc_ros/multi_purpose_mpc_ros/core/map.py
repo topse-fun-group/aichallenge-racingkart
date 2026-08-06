@@ -4,8 +4,12 @@ import yaml
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 from PIL import Image
-from skimage.morphology import remove_small_holes
-from skimage.draw import line_aa
+try:
+    from skimage.morphology import remove_small_holes
+except ImportError:
+    from scipy.ndimage import binary_fill_holes
+    def remove_small_holes(ar, area_threshold=5, connectivity=1):
+        return binary_fill_holes(ar)
 import matplotlib.patches as plt_patches
 
 # Colors

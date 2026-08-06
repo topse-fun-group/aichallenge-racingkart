@@ -23,11 +23,16 @@ reference_path:
   update_by_topic: false # When true, 'circle' must be false
   # path from pkg share dir
   # csv_path: ""
-  csv_path: "env/final_ver3/traj_mincurv.csv"
-  resolution: 0.6
-  smoothing_distance: 2
+  csv_path: "env/final_ver3/traj_out_in_middle.csv"
+  resolution: 0.4
+  smoothing_distance: 3
   max_width: 3.0
   circular: true
+
+  # Override path bounds (width bounds relative to center line)
+  override_path_bounds: true
+  min_bound: -1.5 # [m] Left bound
+  max_bound: 1.5  # [m] Right bound
   use_path_constraints_topic: false
   use_border_cells_topic: false
 
@@ -40,27 +45,27 @@ mpc:
   # Q: [e_y, e_psi, t]
   # R: [v, delta]
   # QN: [e_y, e_psi, t]
-  R: [0.1, 1200.0]  # Aggressive acceleration tracking with smooth steering regularization
+  R: [0.1, 1200.0]  # Smooth steering effort with OSQP native rate limit
   a_min: -1.6 # m/s^2
   a_max: 2.5 # m/s^2 (competitive acceleration matching top team performance)
   delta_max_deg: 32.0 # degrees
-  steer_rate_max: 2.0 # rad/s (5.7x faster for S-curve switchbacks)
+  steer_rate_max: 2.5 # rad/s (OSQP native smooth steer-rate limit eliminating phase-lag self-excitation)
   control_rate: 40.0 # Hz
-  steering_tire_angle_gain_var: 1.0   # 1:1 exact steering gain eliminating 63.9% over-steering gain mismatch
+  steering_tire_angle_gain_var: 1.0   # 1:1 exact steering gain
   # accel_low_pass_gain: 0.1
   # steer_low_pass_gain: 0.3
   accel_low_pass_gain: 1.0
-  steer_low_pass_gain: 1.0   # Direct continuous 40 Hz steering output (eliminating multi-stage staircase lag)
-  wp_id_offset: 2            # Immediate target offset (1.2m - tight curve curvature tracking)
+  steer_low_pass_gain: 0.90 # Near zero-phase-lag output (delay compensation handles smoothness)
+  wp_id_offset: 1            # 80-100ms lookahead offset compensating system latency
   use_max_kappa_pred: false
-  delay_compensation_sec: 0.05             # [s] Mild control latency compensation
-  enable_dynamic_delay_compensation: true  # Dynamic delay compensation flag based on velocity
+  delay_compensation_sec: 0.10             # [s] 100ms steering latency compensation for early turn-in
+  enable_dynamic_delay_compensation: false # Disabled to eliminate discrete offset jump oscillation post-curve
 
   ## --- 高速最適安定周回 (OSQPソルバ完全実現可能性・衝突ゼロ) --- ##
   v_max: 45.0
-  ay_max: 13.0
-  Q: [200.0, 1500.0, 100.0]
-  QN: [200.0, 1500.0, 100.0]
+  ay_max: 9.5 # Physical lateral acceleration limit (9.5 m/s^2) for stable cornering
+  Q: [300.0, 600.0, 100.0] # Harmonious tracking with low heading oscillation
+  QN: [300.0, 600.0, 100.0]
 
   ## -------- 低速 -------------- ##
   ## Lap1: 86s
@@ -89,7 +94,9 @@ v2x_obstacle_avoidance:
   overtake_patience: 3.0       # [s] FOLLOWING 継続後、追い越しモードに移行するまでの時間
   overtake_gap_min: 10.0       # [m] 追い越し判断の最大距離
   overtake_clearance: 8.0      # [m] 追い越し完了と判断する前方距離
-  vehicle_radius_overtake: 0.6 # [m] 追い越し中の障害物半径（縮小して横抜けを容易にする）
+  vehicle_radius_overtake: 0.65 # [m] 追い越し中の障害物半径（0.65mに調整し横抜け時の角すれ違い安全性を確保）
+  overtake_speed_diff_threshold: 3.0 # [m/s] (約10.8km/h) 自車・前車の速度差がこれ以上でダイレクト OVERTAKING 遷移
+  cross_velocity_threshold: 2.5 # [m/s] (約9.0km/h) 前車がこれ以上の横方向速度で自車前方を横切っている場合はダイレクト OVERTAKING をブロック
 
 stuck_recovery:
   enable_stuck_recovery: true
@@ -98,3 +105,4 @@ stuck_recovery:
   reverse_speed: -2.5              # [m/s] バック時の目標速度 (約 -9.0 km/h)
   reverse_duration: 2.0            # [s] バック継続時間
   stop_duration: 0.4               # [s] ギアシフト・確認停止時間
+  reverse_steer_angle: 0.35        # [rad] (約20度) バック時回避切返し操舵角

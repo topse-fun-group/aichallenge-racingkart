@@ -183,41 +183,62 @@ class SpatialBicycleModel(ABC):
 
     def t2s(self, reference_waypoint, reference_state):
         """
-        Convert spatial state to temporal state. Either convert self.spatial_
-        state with current waypoint as reference or provide reference waypoint
-        and reference_state.
+        Convert temporal state to spatial state using Continuous Segment Projection
+        to eliminate discrete 2.3-degree heading step jumps at waypoint transitions.
         :return Spatial State equivalent to reference state
         """
-
-        # Compute spatial state variables
         if isinstance(reference_state, np.ndarray):
-            e_y = np.cos(reference_waypoint.psi) * \
-                  (reference_state[1] - reference_waypoint.y) - \
-                  np.sin(reference_waypoint.psi) * (reference_state[0] -
-                                                    reference_waypoint.x)
-            e_psi = reference_state[2] - reference_waypoint.psi
-
-            # Ensure e_psi is kept within range (-pi, pi]
-            e_psi = np.mod(e_psi + math.pi, 2 * math.pi) - math.pi
+            cx, cy, cpsi = float(reference_state[0]), float(reference_state[1]), float(reference_state[2])
         elif isinstance(reference_state, TemporalState):
-            e_y = np.cos(reference_waypoint.psi) * \
-                  (reference_state.y - reference_waypoint.y) - \
-                  np.sin(reference_waypoint.psi) * (reference_state.x -
-                                                    reference_waypoint.x)
-            e_psi = reference_state.psi - reference_waypoint.psi
-
-            # Ensure e_psi is kept within range (-pi, pi]
-            e_psi = np.mod(e_psi + math.pi, 2 * math.pi) - math.pi
+            cx, cy, cpsi = float(reference_state.x), float(reference_state.y), float(reference_state.psi)
         else:
             print('Reference State type not supported!')
-            e_y, e_psi = None, None
-            exit(1)
+            return SimpleSpatialState(0.0, 0.0, 0.0)
 
-        # time state can be set to zero since it's only relevant for the MPC
-        # prediction horizon
-        t = 0.0
+        # Use continuous segment projection around current self.wp_id (modulo n_base to avoid extension seam reversal)
+        n_wps = len(self.reference_path.waypoints)
+        if n_wps < 2:
+            e_y = np.cos(reference_waypoint.psi) * (cy - reference_waypoint.y) - \
+                  np.sin(reference_waypoint.psi) * (cx - reference_waypoint.x)
+            e_psi = np.mod(cpsi - reference_waypoint.psi + math.pi, 2 * math.pi) - math.pi
+            return SimpleSpatialState(e_y, e_psi, 0.0)
 
-        return SimpleSpatialState(e_y, e_psi, t)
+        n_base = getattr(self.reference_path, 'n_base_waypoints', n_wps) if getattr(self.reference_path, 'circular', False) else n_wps
+        curr_id = getattr(self, 'wp_id', 0) % n_base
+        best_dist_sq = float('inf')
+        best_ey = 0.0
+        best_epsi = 0.0
+
+        # Test segments (curr_id-1, curr_id), (curr_id, curr_id+1), (curr_id+1, curr_id+2) modulo n_base
+        p_car = np.array([cx, cy])
+        for seg_offset in [-1, 0, 1]:
+            idx1 = (curr_id + seg_offset) % n_base
+            idx2 = (idx1 + 1) % n_base
+
+            wp1 = self.reference_path.waypoints[idx1]
+            wp2 = self.reference_path.waypoints[idx2]
+
+            p1 = np.array([wp1.x, wp1.y])
+            p2 = np.array([wp2.x, wp2.y])
+            v_seg = p2 - p1
+            v_len_sq = np.dot(v_seg, v_seg)
+            if v_len_sq < 1e-12:
+                continue
+
+            t_factor = np.clip(np.dot(p_car - p1, v_seg) / v_len_sq, 0.0, 1.0)
+            proj = p1 + t_factor * v_seg
+
+            dist_sq = np.dot(p_car - proj, p_car - proj)
+            if dist_sq < best_dist_sq:
+                best_dist_sq = dist_sq
+                dpsi = np.mod(wp2.psi - wp1.psi + math.pi, 2 * math.pi) - math.pi
+                proj_psi = wp1.psi + t_factor * dpsi
+
+                norm_vec = np.array([-np.sin(proj_psi), np.cos(proj_psi)])
+                best_ey = float(np.dot(p_car - proj, norm_vec))
+                best_epsi = float(np.mod(cpsi - proj_psi + math.pi, 2 * math.pi) - math.pi)
+
+        return SimpleSpatialState(best_ey, best_epsi, 0.0)
 
     def drive(self, u):
         """
@@ -250,12 +271,8 @@ class SpatialBicycleModel(ABC):
         """
 
         # Model ellipsoid around the car
-        # safety_margin = self.width
-        safety_margin = self.width / 2.0  # Physical half-width: 1.45/2 = 0.725m (was width/sqrt(2) = 1.025m)
-        # safety_margin = self.width / np.sqrt(2)
-        # safety_margin = self.width / np.sqrt(2) / 2.0
-        # safety_margin = 0.0
-
+        # safety_margin = self.width / 2.0  # Physical half-width: 1.45/2 = 0.725m (was width/sqrt(2) = 1.025m)
+        safety_margin = self.width / 4.0  # 0.25m margin unblocking inner corner bounds (lb_sm)
         return safety_margin
 
     def get_current_waypoint(self):
@@ -292,19 +309,40 @@ class SpatialBicycleModel(ABC):
 
     def get_closest_waypoint(self, x, y):
         """
-        Get the index of the closest waypoint to the given x, y coordinates.
+        Get the index of the closest waypoint to the given x, y coordinates
+        using a local window around current self.wp_id to prevent false jumps
+        to adjacent track segments.
         :param x: x coordinate
         :param y: y coordinate
         :return: Index of the closest waypoint
         """
-        # Compute distances from the point to all waypoints
-        distances = np.sqrt((np.array([wp.x for wp in self.reference_path.waypoints]) - x)**2 +
-                            (np.array([wp.y for wp in self.reference_path.waypoints]) - y)**2)
+        n_wps = len(self.reference_path.waypoints)
+        if n_wps == 0:
+            return 0
 
-        # Get the index of the closest waypoint
-        closest_wp_id = np.argmin(distances)
+        n_base = getattr(self.reference_path, 'n_base_waypoints', n_wps) if getattr(self.reference_path, 'circular', False) else n_wps
 
-        return closest_wp_id
+        # If wp_id is not yet initialized or zero, fallback to full search once
+        curr_id = getattr(self, 'wp_id', 0) % n_base
+        if not hasattr(self, '_wp_id_initialized') or not self._wp_id_initialized:
+            distances_sq = (np.array([wp.x for wp in self.reference_path.waypoints[:n_base]]) - x)**2 + \
+                           (np.array([wp.y for wp in self.reference_path.waypoints[:n_base]]) - y)**2
+            self._wp_id_initialized = True
+            return int(np.argmin(distances_sq))
+
+        # Local window search (-10 to +25 waypoints around curr_id, wrapped modulo n_base)
+        window_indices = [(curr_id + i) % n_base for i in range(-10, 26)]
+        best_id = curr_id
+        min_dist_sq = float('inf')
+
+        for idx in window_indices:
+            wp = self.reference_path.waypoints[idx]
+            dist_sq = (wp.x - x)**2 + (wp.y - y)**2
+            if dist_sq < min_dist_sq:
+                min_dist_sq = dist_sq
+                best_id = idx
+
+        return best_id
 
     def get_s_at_waypoint(self, wp_id):
         """

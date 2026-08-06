@@ -24,8 +24,8 @@ reference_path:
   # path from pkg share dir
   # csv_path: ""
   csv_path: "env/kashiwanoha/traj_mincurv.csv"
-  resolution: 0.6
-  smoothing_distance: 2
+  resolution: 0.4
+  smoothing_distance: 3
   max_width: 3.0
   circular: true  # kashiwanoha lower-2-cell route is a closed loop
   use_path_constraints_topic: false
@@ -41,19 +41,21 @@ mpc:
   # Q: [e_y, e_psi, t]
   # R: [v, delta]
   # QN: [e_y, e_psi, t]
-  R: [10.0, 1200.0]  # Smooth continuous MPC steering regularization
+  R: [10.0, 1500.0]  # Balanced active steering rate damping
   a_min: -1.6 # m/s^2
   a_max: 1.16 # m/s^2 (optimized within allowed overflow margin above 1.0 m/s^2)
   delta_max_deg: 32.0 # degrees
-  steer_rate_max: 2.0 # rad/s (5.7x faster for S-curve switchbacks)
+  steer_rate_max: 2.5 # rad/s (OSQP native smooth steer-rate limit eliminating phase-lag self-excitation)
   control_rate: 40.0 # Hz
-  steering_tire_angle_gain_var: 1.0   # 1:1 exact steering gain eliminating 63.9% over-steering gain mismatch
+  steering_tire_angle_gain_var: 1.0   # 1:1 exact steering gain
   # accel_low_pass_gain: 0.1
   # steer_low_pass_gain: 0.3
   accel_low_pass_gain: 1.0
-  steer_low_pass_gain: 1.0   # Direct continuous 40 Hz steering output (eliminating multi-stage staircase lag)
-  wp_id_offset: 2            # Immediate target offset (1.2m - tight curve curvature tracking)
+  steer_low_pass_gain: 1.0 # 1.0 = Pure passthrough with 0.00-sec ZERO phase lag
+  wp_id_offset: 1            # 80-100ms lookahead offset compensating system latency
   use_max_kappa_pred: true
+  delay_compensation_sec: 0.10             # [s] 100ms steering latency compensation for early turn-in
+  enable_dynamic_delay_compensation: false # Disabled to eliminate discrete offset jump oscillation post-curve
 
 
   ## ---------- 究極 ------------- ##
@@ -66,9 +68,9 @@ mpc:
 
   ## --- 高速最適安定周回 (OSQPソルバ完全実現可能性・衝突ゼロ) --- ##
   v_max: 45.0
-  ay_max: 12.0
-  Q: [200.0, 1500.0, 100.0]
-  QN: [200.0, 1500.0, 100.0]
+  ay_max: 13.0
+  Q: [400.0, 800.0, 100.0]
+  QN: [400.0, 800.0, 100.0]
 
   ## -------- 低速 -------------- ##
   ## Lap1: 86s

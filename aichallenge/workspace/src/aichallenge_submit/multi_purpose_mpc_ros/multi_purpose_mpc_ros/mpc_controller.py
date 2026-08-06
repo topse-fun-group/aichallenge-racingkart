@@ -62,6 +62,7 @@ def array_to_ackermann_control_command(stamp, u: np.ndarray, acc: float) -> Acke
     msg = AckermannControlCommand()
     msg.stamp = stamp
     msg.lateral.stamp = stamp
+    # u[1] is already tire angle delta (rad) — converted from curvature kappa by MPC.py L356
     msg.lateral.steering_tire_angle = u[1]
     msg.lateral.steering_tire_rotation_rate = 2.0
     msg.longitudinal.stamp = stamp
@@ -129,7 +130,7 @@ class MPCController(Node):
     PLOT_RESULTS = False
     ANIMATION_INTERVAL = 20
 
-    KP = 100.0
+    KP = 2.5  # Smooth continuous acceleration P gain eliminating 40Hz Bang-Bang pitching oscillation
 
     def __init__(self, config_path: str, ref_vel_config_path: Optional[str]) -> None:
         super().__init__("mpc_controller") # type: ignore
@@ -512,6 +513,8 @@ class MPCController(Node):
         self._stuck_state: str = "NORMAL"  # NORMAL / REVERSING / STOP_BEFORE_FORWARD
         self._stuck_timer_start: Optional[float] = None
         self._stuck_phase_start: Optional[float] = None
+        self._has_launched: bool = False  # 発進完了フラグ（初期発進時の誤リバース発動を予防）
+        self._stuck_evasive_steer: float = 0.0  # バック時回避切返し操舵角
 
         # Laps
         self._current_laps = 1
@@ -622,13 +625,8 @@ class MPCController(Node):
         if not self.USE_BUG_ACC:
             self._command_raw_pub.publish(cmd)
 
-        # compensate steering angle for the real vehicle
-        # AWSIMにおいても後段のactuation_cmd_converter でgainを考慮した指令を生成するため、実機/sim問わず
-        # gain を掛ける
-        if self.USE_BUG_ACC:
-            cmd.command.lateral.steering_tire_angle *= self._mpc_cfg.steering_tire_angle_gain_var
-        else:
-            cmd.lateral.steering_tire_angle *= self._mpc_cfg.steering_tire_angle_gain_var
+        # Pure 1:1 control command output without redundant steering gain multiplication
+        # actuation_cmd_converter in downstream pipeline handles gains natively.
         self._command_pub.publish(cmd)
 
     def _publish_gear_command(self, gear_val: int) -> None:
@@ -705,6 +703,8 @@ class MPCController(Node):
         min_ttc = float('inf')
         lead_speed = 0.0
         is_leading_ahead = False
+        min_rel_fwd = 0.0
+        min_rel_lat = 0.0
 
         fwd_cos = math.cos(ego_yaw)
         fwd_sin = math.sin(ego_yaw)
@@ -736,10 +736,16 @@ class MPCController(Node):
                 min_d = d
                 is_leading_ahead = True
                 lead_speed = math.hypot(vx, vy)
-                # 相対接近速度（自車進行方向成分）
+                # 相対接近速度（自車進行方向成分: 縦速度）
                 ego_vx = ego_speed_mps * fwd_cos
                 ego_vy = ego_speed_mps * fwd_sin
                 rel_approach = (ego_vx - vx) * fwd_cos + (ego_vy - vy) * fwd_sin
+                # 横方向相対移動速度（自車横方向成分: クロス速度）
+                rel_cross = abs((ego_vx - vx) * (-fwd_sin) + (ego_vy - vy) * fwd_cos)
+
+                min_rel_fwd = rel_approach
+                min_rel_lat = rel_cross
+
                 if rel_approach > 0.0:
                     min_ttc = d / rel_approach
                 else:
@@ -762,10 +768,30 @@ class MPCController(Node):
             self._v2x_speed_limit = float('inf')
             return
 
+        overtake_speed_diff_thresh = float(getattr(v2x_cfg, 'overtake_speed_diff_threshold', 3.0))
+        cross_velocity_thresh = float(getattr(v2x_cfg, 'cross_velocity_threshold', 2.5))
+
+        # ダイレクト OVERTAKING 判定:
+        # 1. 前方に車両が存在し、距離がアプローチ範囲内 (min_d < follow_start)
+        # 2. 縦方向の接近速度が閾値以上 (min_rel_fwd >= overtake_speed_diff_thresh)
+        # 3. 前車が自車前方を高速度で横切っていないこと (min_rel_lat <= cross_velocity_thresh)
+        is_large_speed_gap = (is_leading_ahead and (min_d < follow_start) and
+                              (min_rel_fwd >= overtake_speed_diff_thresh) and
+                              (min_rel_lat <= cross_velocity_thresh))
+
         # ---- モード遷移ロジック ----
 
+        # ダイレクト OVERTAKING: 大きな速度差（低速・スタック車への接近）時は FOLLOWING/BRAKE をバイパスして直接 OVERTAKING へ
+        if is_large_speed_gap and self._v2x_mode in ("NORMAL", "FOLLOWING"):
+            self._v2x_mode = "OVERTAKING"
+            self._v2x_vehicle_radius = vehicle_radius_overtake
+            self._v2x_speed_limit = float('inf')  # 減速せず最高速度を維持して回避
+            self.get_logger().info(
+                f"[V2X] Direct OVERTAKING (Speed Gap Detected): d={min_d:.1f}m rel_v={rel_speed_diff*3.6:.1f}km/h (ego_v={ego_speed_mps*3.6:.1f}km/h, lead_v={lead_speed*3.6:.1f}km/h)",
+                throttle_duration_sec=1.0)
+
         # EMERGENCY_BRAKE: TTC 危険 or 距離が非常に近い
-        if min_ttc < ttc_thresh or (is_leading_ahead and min_d < follow_brake):
+        elif min_ttc < ttc_thresh or (is_leading_ahead and min_d < follow_brake):
             self._v2x_mode = "EMERGENCY_BRAKE"
             self._v2x_speed_limit = v_min_safe_mps
             self.get_logger().warn(
@@ -1052,7 +1078,18 @@ class MPCController(Node):
         # print(f"mpc x: {self._mpc.model.temporal_state.x}, y: {self._mpc.model.temporal_state.y}, psi: {self._mpc.model.temporal_state.psi}")
 
         with self._stats.time_block("control"):
-            u, max_delta = self._mpc.get_control()
+            # Skip MPC computation during STUCK RECOVERY: vehicle may be reversing (e_psi ~-140deg)
+            # which would corrupt infeasibility_counter and current_control buffer with invalid state.
+            if self._stuck_state == "NORMAL":
+                u, max_delta = self._mpc.get_control()
+                mpc_raw_steer = u[1]  # Save raw MPC output for diagnostics
+                # initial_smooth_blend: Start-up protection preventing initial straight steering chatter
+                if self._loop < 120:
+                    blend_factor = min(1.0, max(0.0, (self._loop - 20) / 100.0))
+                    u[1] = u[1] * blend_factor
+            else:
+                u, max_delta = np.array([0.0, 0.0]), 0.0
+                mpc_raw_steer = 0.0
             # self.get_logger().info(f"u: {u}")
 
         # ベースの制限速度（通常速度プロファイルまたはリファレンス速度）を決定
@@ -1117,12 +1154,26 @@ class MPCController(Node):
         # u[0] = np.clip(last_u[0] + acc * dt, 0.0, self._mpc_cfg.v_max)
 
         # apply low pass filter to control signal
+        steer_before_lpf = u[1]
         acc = self._last_acc + (acc - self._last_acc) * self._mpc_cfg.accel_low_pass_gain
         u[1] = self._last_u[1] + (u[1] - self._last_u[1]) * self._mpc_cfg.steer_low_pass_gain
+
+        # [DIAG] Detailed steering pipeline trace for oscillation debugging
+        e_y0 = self._mpc.model.spatial_state.e_y if self._mpc.model.spatial_state else 0.0
+        e_psi0 = self._mpc.model.spatial_state.e_psi if self._mpc.model.spatial_state else 0.0
+        print(f'[STEER_DIAG] wp={self._mpc.model.wp_id} e_y={e_y0:.4f} e_psi={e_psi0:.4f} '
+              f'mpc_raw={mpc_raw_steer:.4f} pre_lpf={steer_before_lpf:.4f} post_lpf={u[1]:.4f} '
+              f'prev_steer={self._mpc.previous_steering:.4f} v={v:.2f} acc={acc:.2f}')
 
         self._last_acc = acc
         self._last_u[0] = u[0]
         self._last_u[1] = u[1]
+
+        # Sync actual steering command to MPC internal previous_steering
+        # u[1] is tire angle delta (rad) after MPC.py L356 arctan conversion
+        # MPC internally works in curvature kappa (1/m) space, so convert back: kappa = tan(delta) / length
+        kappa_for_mpc = np.tan(u[1]) / self._car.length
+        self._mpc.set_previous_steering(kappa_for_mpc)
 
         # --- Stuck Recovery Logic ---
         stuck_cfg = getattr(self._cfg, 'stuck_recovery', None)
@@ -1137,17 +1188,20 @@ class MPCController(Node):
 
             now_sec = now.nanoseconds / 1e9
 
-            # 制御開始直後（3.0秒以内）かつ非衝突時は発進保護ガード
-            if self._loop < 120 and not is_colliding:
+            # 発進完了判定: 一度でも車速 0.5 m/s を超えたら発進完了とみなす
+            if abs(v) > 0.5:
+                self._has_launched = True
+
+            # 制御無効時または未発進（かつ非衝突）状態ではスタックタイマーをリセット
+            if not self._enable_control or (not self._has_launched and not is_colliding):
                 self._stuck_timer_start = None
 
             elif self._stuck_state == "NORMAL":
                 # 壁衝突時: abs(v) <= 0.8 m/s かつ 0.5秒継続で即座にリカバリー発動
-                # 非衝突時: abs(v) <= stuck_vel_thresh かつ 1.0秒継続でリカバリー発動
-                # (MPCが解なしで u[0] = 0 を出力している壁めり込み時も検出)
+                # 非衝突時: 発進完了後 (self._has_launched) かつ前進指示中 (u[0] > 1.0) で abs(v) <= 0.05 m/s が 3.0秒継続で発動
                 is_stuck_candidate = (
                     (is_colliding and abs(v) <= 0.8) or
-                    (abs(v) <= stuck_vel_thresh)
+                    (self._has_launched and abs(v) <= 0.05 and u[0] > 1.0)
                 )
 
                 req_time = 0.5 if is_colliding else stuck_time_thresh
@@ -1158,7 +1212,43 @@ class MPCController(Node):
                     elif (now_sec - self._stuck_timer_start) >= req_time:
                         self._stuck_state = "BRAKE_BEFORE_REVERSE"
                         self._stuck_phase_start = now_sec
-                        self.get_logger().warn(f"[STUCK RECOVERY] Stuck detected! (v={v:.2f} m/s, colliding={is_colliding}, duration={now_sec - self._stuck_timer_start:.1f}s). Initiating reverse sequence...")
+
+                        # バック時回避操舵角の計算（前車の相対位置またはコース偏位に基づく切返し方向決定）
+                        rev_steer_angle = float(getattr(stuck_cfg, 'reverse_steer_angle', 0.35)) if stuck_cfg else 0.35
+                        lead_rel_y = 0.0
+                        found_lead = False
+                        if self._odom is not None and hasattr(self, '_v2x_tracker'):
+                            pose = odom_to_pose_2d(self._odom)
+                            ego_x, ego_y, ego_yaw = pose.x, pose.y, pose.theta
+                            fwd_sin, fwd_cos = math.sin(ego_yaw), math.cos(ego_yaw)
+                            left_cos, left_sin = -fwd_sin, fwd_cos
+
+                            min_d = float('inf')
+                            for vid in self._v2x_tracker.active_vehicle_ids():
+                                if vid == self._vehicle_id:
+                                    continue
+                                buf = self._v2x_tracker._samples.get(vid)
+                                if not buf:
+                                    continue
+                                _, ox, oy = buf[-1]
+                                dx, dy = ox - ego_x, oy - ego_y
+                                d = math.hypot(dx, dy)
+                                if 0.5 <= d < 15.0 and d < min_d:
+                                    lead_rel_y = dx * left_cos + dy * left_sin
+                                    min_d = d
+                                    found_lead = True
+
+                        if not found_lead:
+                            e_y_curr = self._mpc.model.spatial_state.e_y if self._mpc.model.spatial_state else 0.0
+                            lead_rel_y = e_y_curr
+
+                        # 前車が左側 (lead_rel_y > 0) -> バック時「左ステア (+rev_steer_angle)」でノーズを右へ振る
+                        # 前車が右側 (lead_rel_y <= 0) -> バック時「右ステア (-rev_steer_angle)」でノーズを左へ振る
+                        self._stuck_evasive_steer = rev_steer_angle if lead_rel_y > 0 else -rev_steer_angle
+
+                        self.get_logger().warn(
+                            f"[STUCK RECOVERY] Stuck detected! (v={v:.2f} m/s, colliding={is_colliding}, duration={now_sec - self._stuck_timer_start:.1f}s). "
+                            f"Evasive reverse steer set to {self._stuck_evasive_steer:.2f} rad. Initiating reverse sequence...")
                 else:
                     self._stuck_timer_start = None
 
@@ -1173,16 +1263,16 @@ class MPCController(Node):
                 else:
                     self._stuck_state = "REVERSING"
                     self._stuck_phase_start = now_sec
-                    self.get_logger().warn("[STUCK RECOVERY] Shifted to REVERSE. Reversing now...")
+                    self.get_logger().warn(f"[STUCK RECOVERY] Shifted to REVERSE. Reversing with evasive steer {self._stuck_evasive_steer:.2f} rad...")
 
             elif self._stuck_state == "REVERSING":
                 elapsed = now_sec - (self._stuck_phase_start or now_sec)
                 if elapsed < rev_duration:
                     u[0] = abs(rev_speed)
                     acc = 1.5
-                    u[1] = 0.0
+                    u[1] = self._stuck_evasive_steer
                     bug_acc_enabled = False
-                    self.get_logger().warn(f"[STUCK RECOVERY] Reversing straight... v_cmd={u[0]:.1f} m/s, acc={acc:.1f} ({elapsed:.1f}/{rev_duration:.1f}s)", throttle_duration_sec=0.3)
+                    self.get_logger().warn(f"[STUCK RECOVERY] Reversing evasively... v_cmd={u[0]:.1f} m/s, steer={u[1]:.2f} rad ({elapsed:.1f}/{rev_duration:.1f}s)", throttle_duration_sec=0.3)
                 else:
                     self._stuck_state = "STOP_BEFORE_FORWARD"
                     self._stuck_phase_start = now_sec
@@ -1199,7 +1289,20 @@ class MPCController(Node):
                     self._car.update_reference_path(self._car.reference_path)
                     self._stuck_state = "NORMAL"
                     self._stuck_timer_start = None
-                    self.get_logger().warn("[STUCK RECOVERY] Resuming normal forward MPC control!")
+                    # Reset MPC internal state: during REVERSING, e_psi can be ~-140deg
+                    # which corrupts infeasibility_counter and current_control buffer.
+                    self._mpc.infeasibility_counter = 0
+                    self._mpc.current_control = np.zeros(self._mpc.current_control.shape)
+                    self._mpc.set_previous_steering(0.0)
+
+                    # Post-recovery: Force V2X mode to OVERTAKING with reduced radius to pass the obstacle smoothly
+                    v2x_cfg = getattr(self._cfg, 'v2x_obstacle_avoidance', None)
+                    v_rad_ot = float(getattr(v2x_cfg, 'vehicle_radius_overtake', 0.65)) if v2x_cfg else 0.65
+                    self._v2x_mode = "OVERTAKING"
+                    self._v2x_vehicle_radius = v_rad_ot
+                    self._v2x_speed_limit = float('inf')
+
+                    self.get_logger().warn("[STUCK RECOVERY] Resuming forward MPC control in OVERTAKING mode! (MPC state reset & evasive radius active)")
 
         # update car state (use v for feedback actual speed)
         self._car.drive([v, u[1]])

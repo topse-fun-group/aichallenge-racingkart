@@ -64,9 +64,7 @@ if(install_result)
     message(FATAL_ERROR "Failed to install python dependencies in virtual environment")
 endif()
 
-ament_auto_package(
-  USE_SCOPED_HEADER_INSTALL_DIR
-  INSTALL_TO_SHARE
+ament_auto_package(INSTALL_TO_SHARE
   config
   launch
   env

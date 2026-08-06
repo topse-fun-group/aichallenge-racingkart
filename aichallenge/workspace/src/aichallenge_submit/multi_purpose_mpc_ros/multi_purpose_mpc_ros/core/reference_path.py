@@ -4,7 +4,15 @@ import numpy.ma as ma
 import math
 import copy
 from multi_purpose_mpc_ros.core.map import Map, Obstacle
-from skimage.draw import line_aa
+try:
+    from skimage.draw import line_aa
+except ImportError:
+    def line_aa(r0, c0, r1, c1):
+        num = max(abs(r1 - r0), abs(c1 - c0)) + 1
+        r = np.linspace(r0, r1, num, dtype=int)
+        c = np.linspace(c0, c1, num, dtype=int)
+        val = np.ones(num)
+        return r, c, val
 import matplotlib.pyplot as plt
 from scipy import sparse
 import osqp
@@ -199,7 +207,11 @@ class ReferencePath:
 
         # Number of waypoints
         self.n_waypoints = len(self.waypoints)
-        # print(f"input waypoint: {len(wp_x)}, n_waypoints: {self.n_waypoints}")
+        if self.circular:
+            self.n_base_waypoints = max(1, self.n_waypoints - self.smoothing_distance * 3)
+        else:
+            self.n_base_waypoints = self.n_waypoints
+        # print(f"input waypoint: {len(wp_x)}, n_waypoints: {self.n_waypoints}, n_base: {self.n_base_waypoints}")
 
         # Length of path
         self.length, self.segment_lengths = self._compute_length()
@@ -241,8 +253,12 @@ class ReferencePath:
         """
 
         if self.circular:
+            # If the last waypoint is a duplicate of the first waypoint (e.g. traj_mincurv.csv),
+            # strip the duplicate last element to prevent a 0-distance seam jump.
+            if len(wp_x) > 1 and dist(wp_x[0], wp_y[0], wp_x[-1], wp_y[-1]) < 1e-3:
+                wp_x = wp_x[:-1]
+                wp_y = wp_y[:-1]
             # insert the first smoothing_distance points to the end of the list
-            # FIXME: コースを循環させるときに始点と終点にギャップができないように要素を追加している。しかし、 smoothing_distance に応じて追加要素数を調整する必要があり、マジックナンバーが存在している
             wp_x = wp_x + wp_x[:self.smoothing_distance * 3]
             wp_y = wp_y + wp_y[:self.smoothing_distance * 3]
 
@@ -299,19 +315,28 @@ class ReferencePath:
             # Difference vector
             dif_ahead = next_wp - current_wp
 
-            # Angle ahead
-            psi = np.arctan2(dif_ahead[1], dif_ahead[0])
-
             # Distance to next waypoint
             dist_ahead = np.linalg.norm(dif_ahead, 2)
+
+            # Angle ahead (guard against zero distance duplicate points)
+            if dist_ahead < 1e-6:
+                psi = waypoints[-1].psi if len(waypoints) > 0 else 0.0
+            else:
+                psi = np.arctan2(dif_ahead[1], dif_ahead[0])
 
             # Get x and y coordinates of current waypoint
             x, y = current_wp[0], current_wp[1]
 
             # Compute local curvature at waypoint
-            # first waypoint
             if wp_id == 0:
-                kappa = 0
+                if self.circular and len(waypoint_coordinates) > 2:
+                    prev_wp = np.array(waypoint_coordinates[-2])
+                    dif_behind = current_wp - prev_wp
+                    angle_behind = np.arctan2(dif_behind[1], dif_behind[0])
+                    angle_dif = np.mod(psi - angle_behind + math.pi, 2 * math.pi) - math.pi
+                    kappa = angle_dif / (dist_ahead + self.eps)
+                else:
+                    kappa = 0
             else:
                 prev_wp = np.array(waypoint_coordinates[wp_id - 1])
                 dif_behind = current_wp - prev_wp
@@ -321,6 +346,21 @@ class ReferencePath:
                 kappa = angle_dif / (dist_ahead + self.eps)
 
             waypoints.append(Waypoint(x, y, psi, kappa))
+
+        # Smooth curvature (kappa) across waypoints to remove 20Hz discrete finite-difference noise
+        n_wps = len(waypoints)
+        if n_wps > 5:
+            raw_kappas = np.array([wp.kappa for wp in waypoints])
+            kernel = np.ones(5) / 5.0
+            smoothed_kappas = np.convolve(raw_kappas, kernel, mode='same')
+            # Boundary handling for convolve
+            smoothed_kappas[0] = raw_kappas[0]
+            smoothed_kappas[1] = (raw_kappas[0] + raw_kappas[1] + raw_kappas[2]) / 3.0
+            smoothed_kappas[-1] = raw_kappas[-1]
+            smoothed_kappas[-2] = (raw_kappas[-1] + raw_kappas[-2] + raw_kappas[-3]) / 3.0
+
+            for i in range(n_wps):
+                waypoints[i].kappa = float(smoothed_kappas[i])
 
         return waypoints
 
@@ -528,14 +568,14 @@ class ReferencePath:
         :return: waypoint object
         """
 
-        # Allow circular indexing if circular path
-        if wp_id >= self.n_waypoints and self.circular:
-            wp_id = np.mod(wp_id, self.n_waypoints)
+        # Allow circular indexing modulo n_base_waypoints if circular path
+        if self.circular:
+            n_base = getattr(self, 'n_base_waypoints', self.n_waypoints)
+            if wp_id >= len(self.waypoints) or wp_id < 0:
+                wp_id = np.mod(wp_id, n_base)
         # Terminate execution if end of path reached
         elif wp_id >= self.n_waypoints and not self.circular:
-            # print('Reached end of path!')
             wp_id = self.n_waypoints - 1
-            # exit(1)
 
         return self.waypoints[wp_id]
 
