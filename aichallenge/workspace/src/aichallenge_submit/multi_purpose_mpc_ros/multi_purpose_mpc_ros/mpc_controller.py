@@ -709,6 +709,12 @@ class MPCController(Node):
         fwd_cos = math.cos(ego_yaw)
         fwd_sin = math.sin(ego_yaw)
 
+        wp_lookahead_max = int(getattr(v2x_cfg, 'wp_lookahead_max', 30))
+        wp_dist_max = float(getattr(v2x_cfg, 'wp_dist_max', 2.5))
+        ego_wp_id = self._car.wp_id
+        n_wps = len(self._reference_path.waypoints)
+        n_base = getattr(self._reference_path, 'n_base_waypoints', n_wps) if getattr(self._reference_path, 'circular', False) else n_wps
+
         for vid in self._v2x_tracker.active_vehicle_ids():
             if vid == self._vehicle_id:
                 continue
@@ -725,6 +731,21 @@ class MPCController(Node):
             # 自車位置そのもの（0.5m未満）は自分自身の可能性が高いため絶対除外
             if d < 0.5:
                 continue
+
+            # --- コース沿道・WP_ID 同軌道チェック（壁の裏側・別区間車両を除外） ---
+            if n_base > 0:
+                lead_wp_id = self._car.get_closest_waypoint(ox, oy)
+                wp_diff = (lead_wp_id - (ego_wp_id % n_base)) % n_base
+
+                # 1. 前方 1 〜 wp_lookahead_max (30) WP 以内に位置すること（遠い壁裏車両を除外）
+                if not (1 <= wp_diff <= wp_lookahead_max):
+                    continue
+
+                # 2. 最寄 WP からの離れ距離が wp_dist_max (2.5m) 以内であること（コース外車両を除外）
+                lead_wp = self._reference_path.waypoints[lead_wp_id % len(self._reference_path.waypoints)]
+                dist_to_wp = math.hypot(ox - lead_wp.x, oy - lead_wp.y)
+                if dist_to_wp > wp_dist_max:
+                    continue
 
             # 前方判定：進行方向の内積をユークリッド距離で割ったcos値が閾値以上
             # （0.5 = 60度以内を「前方」と判定。横並び車両を除外）
@@ -1158,12 +1179,10 @@ class MPCController(Node):
         acc = self._last_acc + (acc - self._last_acc) * self._mpc_cfg.accel_low_pass_gain
         u[1] = self._last_u[1] + (u[1] - self._last_u[1]) * self._mpc_cfg.steer_low_pass_gain
 
-        # [DIAG] Detailed steering pipeline trace for oscillation debugging
-        e_y0 = self._mpc.model.spatial_state.e_y if self._mpc.model.spatial_state else 0.0
-        e_psi0 = self._mpc.model.spatial_state.e_psi if self._mpc.model.spatial_state else 0.0
-        print(f'[STEER_DIAG] wp={self._mpc.model.wp_id} e_y={e_y0:.4f} e_psi={e_psi0:.4f} '
-              f'mpc_raw={mpc_raw_steer:.4f} pre_lpf={steer_before_lpf:.4f} post_lpf={u[1]:.4f} '
-              f'prev_steer={self._mpc.previous_steering:.4f} v={v:.2f} acc={acc:.2f}')
+        # [DIAG] Detailed steering pipeline trace for oscillation debugging (commented out to save CPU/IO)
+        # print(f'[STEER_DIAG] wp={self._mpc.model.wp_id} e_y={e_y0:.4f} e_psi={e_psi0:.4f} '
+        #       f'mpc_raw={mpc_raw_steer:.4f} pre_lpf={steer_before_lpf:.4f} post_lpf={u[1]:.4f} '
+        #       f'prev_steer={self._mpc.previous_steering:.4f} v={v:.2f} acc={acc:.2f}')
 
         self._last_acc = acc
         self._last_u[0] = u[0]

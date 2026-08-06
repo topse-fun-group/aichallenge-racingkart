@@ -221,12 +221,12 @@ class MPC:
         xmin_dyn[0] = -np.inf
         xmax_dyn[0] = np.inf
 
-        # [DEBUG] print diagnostics on each new infeasibility event
-        if self.infeasibility_counter == 0:
-            print(f'[MPC_DBG] wp_id={self.model.wp_id} e_y0={e_y0:.4f} e_psi0={e_psi0:.4f} '
-                  f'ub[0]={float(ub[0] if hasattr(ub,"__len__") else ub):.4f} '
-                  f'lb[0]={float(lb[0] if hasattr(lb,"__len__") else lb):.4f} '
-                  f'N={N} lb_shape={getattr(lb,"shape","scalar")} ub_shape={getattr(ub,"shape","scalar")}')
+        # [DEBUG] print diagnostics on each new infeasibility event (commented out to save CPU/IO)
+        # if self.infeasibility_counter == 0:
+        #     print(f'[MPC_DBG] wp_id={self.model.wp_id} e_y0={e_y0:.4f} e_psi0={e_psi0:.4f} '
+        #           f'ub[0]={float(ub[0] if hasattr(ub,"__len__") else ub):.4f} '
+        #           f'lb[0]={float(lb[0] if hasattr(lb,"__len__") else lb):.4f} '
+        #           f'N={N} lb_shape={getattr(lb,"shape","scalar")} ub_shape={getattr(ub,"shape","scalar")}')
 
         # Target lateral error e_y_ref = 0.0 (exact out-in-out reference path tracking)
         xr[self.nx::self.nx] = 0.0

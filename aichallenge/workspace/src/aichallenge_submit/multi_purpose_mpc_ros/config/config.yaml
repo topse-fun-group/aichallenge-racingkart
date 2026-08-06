@@ -97,6 +97,8 @@ v2x_obstacle_avoidance:
   vehicle_radius_overtake: 0.65 # [m] 追い越し中の障害物半径（0.65mに調整し横抜け時の角すれ違い安全性を確保）
   overtake_speed_diff_threshold: 3.0 # [m/s] (約10.8km/h) 自車・前車の速度差がこれ以上でダイレクト OVERTAKING 遷移
   cross_velocity_threshold: 2.5 # [m/s] (約9.0km/h) 前車がこれ以上の横方向速度で自車前方を横切っている場合はダイレクト OVERTAKING をブロック
+  wp_lookahead_max: 30         # [WP] 同一コース沿道判定の最大先読みウェイポイント数（壁裏車を除外）
+  wp_dist_max: 2.5             # [m] 他車座標から最寄ウェイポイントまでの最大離れ距離（コース外・壁裏を除外）
 
 stuck_recovery:
   enable_stuck_recovery: true
