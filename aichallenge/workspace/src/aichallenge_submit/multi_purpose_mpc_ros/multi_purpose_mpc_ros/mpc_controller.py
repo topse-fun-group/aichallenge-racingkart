@@ -53,6 +53,10 @@ from multi_purpose_mpc_ros.exexution_stats import ExecutionStats
 from multi_purpose_mpc_ros_msgs.msg import AckermannControlBoostCommand, PathConstraints, BorderCells
 from multi_purpose_mpc_ros.tools.reference_velocity_configulator import ReferenceVelocityConfigulator
 
+# Driving Modes
+from multi_purpose_mpc_ros.modes.v2x_mode_manager import V2XModeManager
+from multi_purpose_mpc_ros.modes.stuck_recovery_manager import StuckRecoveryManager
+
 
 RED = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)
 YELLOW = ColorRGBA(r=1.0, g=1.0, b=0.0, a=1.0)
@@ -475,6 +479,11 @@ class MPCController(Node):
         self._trajectory: Optional[Trajectory] = None
         self._path_constraints = None
 
+        # Mode Managers (Initialized early so property setters during _initialize work cleanly)
+        self._v2x_manager = V2XModeManager(self._vehicle_id, logger=self.get_logger())
+        self._stuck_manager = StuckRecoveryManager(self._vehicle_id, logger=self.get_logger())
+        self._has_launched: bool = False  # 発進完了フラグ
+
         # Obstacles
         if self.USE_OBSTACLE_AVOIDANCE:
             self._static_obstacles: List[Obstacle] = create_obstacles()
@@ -498,30 +507,11 @@ class MPCController(Node):
             # ref-path 近傍のみに絞り込む。閾値 = max_width/2 + vehicle_radius + 余白。
             ref_max_width = float(self._cfg.reference_path.max_width)  # type: ignore
             self._v2x_corridor_threshold_sq = (
-                ref_max_width / 2.0 + self._v2x_vehicle_radius + 0.5
+                ref_max_width / 2.0 + float(v2x_cfg.vehicle_radius) + 0.5
             ) ** 2
             wps = self._reference_path.waypoints
             self._waypoint_xy = np.asarray(
                 [(wp.x, wp.y) for wp in wps], dtype=np.float64)
-
-            # V2X 近接制御・追い越しモード状態
-            self._v2x_speed_limit: float = float('inf')   # 動的速度上限 [m/s]
-            self._v2x_mode: str = "NORMAL"                # NORMAL / FOLLOWING / OVERTAKING / EMERGENCY_BRAKE
-            self._v2x_following_since: Optional[float] = None  # FOLLOWING 開始時刻 [s]
-            self._v2x_emergency_brake_since: Optional[float] = None  # EMERGENCY_BRAKE 開始時刻 [s]
-            self._v2x_overtake_lock_until: Optional[float] = None  # OVERTAKING モード維持タイマー [s]
-            self._v2x_motion_start_time: Optional[float] = None  # 車両が動き出した時刻 [s]
-
-        # Stuck Recovery 状態管理
-        self._stuck_state: str = "NORMAL"  # NORMAL / REVERSING / STOP_BEFORE_FORWARD
-        self._stuck_timer_start: Optional[float] = None
-        self._stuck_phase_start: Optional[float] = None
-        self._has_launched: bool = False  # 発進完了フラグ（初期発進時の誤リバース発動を予防）
-        self._stuck_evasive_steer: float = 0.0  # バック時回避切返し操舵角
-        self._last_stuck_recovery_time: Optional[float] = None  # 前回スタックリカバリー時刻 [s]
-        self._stuck_retry_count: int = 0  # 連続スタック試行回数
-        self._v2x_stuck_target_radius: float = 0.85  # スタック回避目標障害物半径 [m]
-        self._stuck_reverse_duration: float = 2.2  # バック継続時間 [s]
 
         # Laps
         self._current_laps = 1
@@ -538,6 +528,38 @@ class MPCController(Node):
         # save config
         if self._cfg.common.save_config:
             self._save_config()
+
+    @property
+    def _v2x_mode(self) -> str:
+        return self._v2x_manager.mode
+
+    @_v2x_mode.setter
+    def _v2x_mode(self, val: str) -> None:
+        self._v2x_manager.mode = val
+
+    @property
+    def _v2x_vehicle_radius(self) -> float:
+        return self._v2x_manager.vehicle_radius
+
+    @_v2x_vehicle_radius.setter
+    def _v2x_vehicle_radius(self, val: float) -> None:
+        self._v2x_manager.vehicle_radius = val
+
+    @property
+    def _v2x_speed_limit(self) -> float:
+        return self._v2x_manager.speed_limit
+
+    @_v2x_speed_limit.setter
+    def _v2x_speed_limit(self, val: float) -> None:
+        self._v2x_manager.speed_limit = val
+
+    @property
+    def _stuck_state(self) -> str:
+        return self._stuck_manager.state
+
+    @_stuck_state.setter
+    def _stuck_state(self, val: str) -> None:
+        self._stuck_manager.state = val
 
     def _save_config(self) -> None:
         now = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -693,255 +715,24 @@ class MPCController(Node):
     def _update_v2x_mode(
         self, ego_x: float, ego_y: float, ego_yaw: float, ego_speed_mps: float
     ) -> None:
-        """前方車両との距離・TTC を評価して走行モードと速度制限を更新する。
+        """前方車両との距離・TTC を評価して走行モードと速度制限を更新する (V2XModeManager へ委譲)"""
+        if abs(ego_speed_mps) > 0.5:
+            self._v2x_manager.set_motion_start_time(self.get_clock().now().nanoseconds / 1e9)
 
-        モード遷移:
-          NORMAL ──[前方15m以内]──▶ FOLLOWING ──[5s追走後]──▶ OVERTAKING
-          FOLLOWING / OVERTAKING ──[TTC<3s or 距離<6m]──▶ EMERGENCY_BRAKE
-          OVERTAKING ──[前方10m以上クリア]──▶ NORMAL
-        """
-        v2x_cfg = self._cfg.v2x_obstacle_avoidance  # type: ignore
-        follow_start = float(v2x_cfg.follow_distance_start)
-        follow_brake = float(v2x_cfg.follow_distance_brake)
-        v_min_safe_mps = kmh_to_m_per_sec(float(v2x_cfg.v_min_safe))
-        ttc_thresh = float(v2x_cfg.ttc_threshold)
-        fwd_cos_thresh = float(getattr(v2x_cfg, 'forward_cos_threshold', 0.5))
-        overtake_patience = float(v2x_cfg.overtake_patience)
-        overtake_gap_min = float(v2x_cfg.overtake_gap_min)
-        overtake_clearance = float(v2x_cfg.overtake_clearance)
-        vehicle_radius_overtake = float(v2x_cfg.vehicle_radius_overtake)
-        v_max_normal = self._mpc_cfg.v_max
-
-        min_d = float('inf')
-        min_ttc = float('inf')
-        lead_speed = 0.0
-        is_leading_ahead = False
-        min_rel_fwd = 0.0
-        min_rel_lat = 0.0
-
-        fwd_cos = math.cos(ego_yaw)
-        fwd_sin = math.sin(ego_yaw)
-
-        wp_lookahead_max = int(getattr(v2x_cfg, 'wp_lookahead_max', 30))
-        wp_dist_max = float(getattr(v2x_cfg, 'wp_dist_max', 2.5))
-        ego_wp_id = self._car.wp_id
-        n_wps = len(self._reference_path.waypoints)
-        n_base = getattr(self._reference_path, 'n_base_waypoints', n_wps) if getattr(self._reference_path, 'circular', False) else n_wps
-
-        for vid in self._v2x_tracker.active_vehicle_ids():
-            if vid == self._vehicle_id:
-                continue
-            buf = self._v2x_tracker._samples.get(vid)
-            if not buf:
-                continue
-            _, ox, oy = buf[-1]
-            vx, vy = self._v2x_tracker.velocity(vid)
-
-            dx = ox - ego_x
-            dy = oy - ego_y
-            d = math.hypot(dx, dy)
-
-            # 自車位置そのもの（0.5m未満）は自分自身の可能性が高いため絶対除外
-            if d < 0.5:
-                continue
-
-            # --- コース沿道・WP_ID 同軌道チェック（壁の裏側・別区間車両を除外） ---
-            if n_base > 0:
-                lead_wp_id = self._car.get_closest_waypoint_global(ox, oy)
-                wp_diff = (lead_wp_id - (ego_wp_id % n_base)) % n_base
-
-                # 1. 前方 0 〜 wp_lookahead_max (45) WP 以内に位置すること（同一WP・至近距離 0m〜15m の障害物を絶対保持）
-                if not (0 <= wp_diff <= wp_lookahead_max):
-                    continue
-
-                # 2. 最寄 WP からの離れ距離が wp_dist_max (2.5m) 以内であること（コース外車両を除外）
-                lead_wp = self._reference_path.waypoints[lead_wp_id % len(self._reference_path.waypoints)]
-                dist_to_wp = math.hypot(ox - lead_wp.x, oy - lead_wp.y)
-                if dist_to_wp > wp_dist_max:
-                    continue
-
-            # 前方判定：進行方向の内積をユークリッド距離で割ったcos値が閾値以上
-            # （0.5 = 60度以内を「前方」と判定。横並び車両を除外）
-            dot = dx * fwd_cos + dy * fwd_sin
-            cos_angle = dot / max(d, 0.001)  # = cos(相対角度)
-            is_ahead = cos_angle >= fwd_cos_thresh
-
-            if is_ahead and d < min_d:
-                min_d = d
-                is_leading_ahead = True
-                lead_speed = math.hypot(vx, vy)
-                # 相対接近速度（自車進行方向成分: 縦速度）
-                ego_vx = ego_speed_mps * fwd_cos
-                ego_vy = ego_speed_mps * fwd_sin
-                rel_approach = (ego_vx - vx) * fwd_cos + (ego_vy - vy) * fwd_sin
-                # 横方向相対移動速度（自車横方向成分: クロス速度）
-                rel_cross = abs((ego_vx - vx) * (-fwd_sin) + (ego_vy - vy) * fwd_cos)
-
-                min_rel_fwd = rel_approach
-                min_rel_lat = rel_cross
-
-                if rel_approach > 0.0:
-                    min_ttc = d / rel_approach
-                else:
-                    min_ttc = float('inf')  # 離れていく・同速
-
-        now_sec = self.get_clock().now().nanoseconds / 1e9
-
-        # ---- スタート抑制：車両が動き出してから N 秒間は V2X 制御を無効化 ----
-        # スタート直後であっても前方の静止・スタック障害物は即座に検知・回避可能とするため、
-        # V2X 回避機能の全体ブロックを解除し、常に有効化する
-
-        vehicle_radius_stuck = getattr(self, '_v2x_stuck_target_radius', 0.65)
-
-        # OVERTAKING ロック中: Stuck Recovery 後などの退避・追い越し維持保護
-        if getattr(self, '_v2x_overtake_lock_until', None) is not None:
-            if now_sec < self._v2x_overtake_lock_until:
-                # 完了判定: 前方車が明確に存在し、それが自車後方かつ十分な距離(overtake_clearance)まで離れた場合のみ完了とする
-                # (min_d == inf の一時見失い時は NORMAL に落とさず OVERTAKING を安全維持する)
-                if not is_leading_ahead and (0.5 <= min_d < float('inf')) and min_d >= overtake_clearance:
-                    self._v2x_mode = "NORMAL"
-                    self._v2x_vehicle_radius = self._v2x_vehicle_radius_normal
-                    self._v2x_speed_limit = float('inf')
-                    self._v2x_following_since = None
-                    self._v2x_emergency_brake_since = None
-                    self._v2x_overtake_lock_until = None
-                    self.get_logger().info(f"[V2X] Overtaking COMPLETE during lock! d={min_d:.1f}m. Back to NORMAL.")
-                else:
-                    self._v2x_mode = "OVERTAKING"
-                    self._v2x_vehicle_radius = vehicle_radius_stuck
-                    self._v2x_speed_limit = float('inf')
-                return
-            else:
-                self._v2x_overtake_lock_until = None
-
-        overtake_speed_diff_thresh = float(getattr(v2x_cfg, 'overtake_speed_diff_threshold', 3.0))
-        cross_velocity_thresh = float(getattr(v2x_cfg, 'cross_velocity_threshold', 2.5))
-
-        # 前車スタック・停止中（< 1.5 m/s ≒ 5.4 km/h）の判定
-        is_stationary_lead = (is_leading_ahead and lead_speed < 1.5 and min_d < follow_start)
-
-        # ダイレクト OVERTAKING 判定:
-        # 1. 前方に車両が存在し、距離がアプローチ範囲内 (min_d < follow_start)
-        # 2. 接近速度が大きい (is_large_speed_gap) または前車がスタック・停止中 (is_stationary_lead)
-        # 3. 前車が自車前方を高速度で横切っていないこと (min_rel_lat <= cross_velocity_thresh)
-        is_large_speed_gap = (is_leading_ahead and (min_d < follow_start) and
-                              (min_rel_fwd >= overtake_speed_diff_thresh) and
-                              (min_rel_lat <= cross_velocity_thresh))
-        should_direct_overtake = (is_leading_ahead and (min_d < follow_start) and
-                                  (is_large_speed_gap or is_stationary_lead) and
-                                  (min_rel_lat <= cross_velocity_thresh))
-
-        # ---- モード遷移ロジック ----
-
-        # 1. 前方スタック・静止車 (is_stationary_lead) または大きな速度差 (should_direct_overtake):
-        # EMERGENCY_BRAKE (5m手前での8km/h失速直進ブレーキ) に捕まる前に、
-        # 遠方(15m手前)から 0.0秒遅延なしで即時ダイレクト OVERTAKING へ移行し、滑らかなすり抜け回避ラインを100%形成する
-        if (is_stationary_lead or should_direct_overtake) and self._v2x_mode in ("NORMAL", "FOLLOWING", "EMERGENCY_BRAKE"):
-            self._v2x_mode = "OVERTAKING"
-            self._v2x_vehicle_radius = vehicle_radius_overtake
-            self._v2x_speed_limit = float('inf')  # 減速せず最高速度を維持して滑らかに回避
-            self._v2x_emergency_brake_since = None
-            self.get_logger().info(
-                f"[V2X] Instant Direct OVERTAKING (Stationary/Stuck Lead Avoidance): d={min_d:.1f}m lead_v={lead_speed*3.6:.1f}km/h rad={self._v2x_vehicle_radius:.2f}m",
-                throttle_duration_sec=1.0)
-
-        # 2. EMERGENCY_BRAKE: 動いている前車との TTC 危険 or 距離が非常に近い場合
-        elif min_ttc < ttc_thresh or (is_leading_ahead and min_d < follow_brake):
-            if self._v2x_mode != "EMERGENCY_BRAKE":
-                self._v2x_mode = "EMERGENCY_BRAKE"
-                self._v2x_emergency_brake_since = now_sec
-
-            eb_duration = now_sec - (self._v2x_emergency_brake_since or now_sec)
-
-            # スタート加速保護: 1周目のスタート直線(ego_wp_id < 40)かつ前車が移動中(lead_speed >= 1.5m/s)の場合、
-            # 8km/h失速ブレーキを掛けず前車速度に応じた加速を維持
-            is_startup_acceleration_phase = (
-                ego_wp_id < 40 and
-                self._v2x_motion_start_time is not None and
-                (now_sec - self._v2x_motion_start_time < 12.0)
-            )
-
-            if is_startup_acceleration_phase and lead_speed >= 1.5:
-                self._v2x_speed_limit = max(lead_speed, 5.0)  # [m/s] 18km/h以上でスタート加速維持
-                self.get_logger().info(
-                    f"[V2X] Startup Acceleration Phase Protection: Maintaining lead speed {lead_speed*3.6:.1f} km/h, no eb stall.",
-                    throttle_duration_sec=1.0)
-            else:
-                self._v2x_speed_limit = v_min_safe_mps
-
-            # EMERGENCY_BRAKE に滞在して前車が停止・スタックした場合または時間経過時は OVERTAKING に移行
-            if is_stationary_lead or eb_duration >= overtake_patience:
-                self._v2x_mode = "OVERTAKING"
-                self._v2x_vehicle_radius = vehicle_radius_overtake
-                self._v2x_speed_limit = float('inf')
-                self._v2x_emergency_brake_since = None
-                self.get_logger().info(
-                    f"[V2X] EMERGENCY_BRAKE -> OVERTAKING (Immediate Stationary bypass): dur={eb_duration:.1f}s d={min_d:.1f}m rad={self._v2x_vehicle_radius:.2f}m")
-            else:
-                self.get_logger().warn(
-                    f"[V2X] EMERGENCY_BRAKE: d={min_d:.1f}m ttc={min_ttc:.1f}s (dur={eb_duration:.1f}s)",
-                    throttle_duration_sec=1.0)
-
-        # NORMAL → FOLLOWING: 前方に車両が近づいてきた
-        elif is_leading_ahead and min_d < follow_start and self._v2x_mode == "NORMAL":
-            self._v2x_mode = "FOLLOWING"
-            self._v2x_following_since = now_sec
-            self._v2x_emergency_brake_since = None
-            target_follow_speed = max(lead_speed, v_min_safe_mps)
-            ratio = max(0.0, (min_d - follow_brake) / (follow_start - follow_brake))
-            acc_speed = target_follow_speed + ratio * (v_max_normal - target_follow_speed)
-            self._v2x_speed_limit = min(v_max_normal, acc_speed)
-            self.get_logger().info(
-                f"[V2X] FOLLOWING (ACC): d={min_d:.1f}m lead_v={lead_speed*3.6:.1f}km/h v_lim={self._v2x_speed_limit*3.6:.1f}km/h",
-                throttle_duration_sec=1.0)
-
-        # FOLLOWING: 速度制限を距離と前車速度に応じて動的に更新 (Adaptive Cruise Control)
-        elif self._v2x_mode == "FOLLOWING":
-            self._v2x_emergency_brake_since = None
-            if not is_leading_ahead or min_d >= follow_start:
-                # 前方車がいなくなった → NORMAL に戻る
-                self._v2x_mode = "NORMAL"
-                self._v2x_speed_limit = float('inf')
-                self._v2x_following_since = None
-                self.get_logger().info("[V2X] Back to NORMAL (vehicle left front zone)")
-            else:
-                # 継続 FOLLOWING: 前車速度に応じた適応型スロットル調整
-                target_follow_speed = max(lead_speed, v_min_safe_mps)
-                ratio = max(0.0, (min_d - follow_brake) / (follow_start - follow_brake))
-                acc_speed = target_follow_speed + ratio * (v_max_normal - target_follow_speed)
-                self._v2x_speed_limit = min(v_max_normal, acc_speed)
-
-                # FOLLOWING → OVERTAKING 判断
-                following_duration = now_sec - (self._v2x_following_since or now_sec)
-                if (following_duration >= overtake_patience
-                        and min_d <= overtake_gap_min):
-                    self._v2x_mode = "OVERTAKING"
-                    self._v2x_vehicle_radius = vehicle_radius_overtake
-                    self._v2x_speed_limit = float('inf')  # 速度制限解除
-                    self.get_logger().info(
-                        f"[V2X] OVERTAKING: following={following_duration:.1f}s d={min_d:.1f}m")
-
-        # OVERTAKING: 追い越し継続 or 完了チェック
-        elif self._v2x_mode == "OVERTAKING":
-            self._v2x_emergency_brake_since = None
-            # 完了判定: 前方車が後方かつ十分な距離
-            if not is_leading_ahead and min_d >= overtake_clearance:
-                self._v2x_mode = "NORMAL"
-                self._v2x_vehicle_radius = self._v2x_vehicle_radius_normal
-                self._v2x_speed_limit = float('inf')
-                self._v2x_following_since = None
-                self.get_logger().info(
-                    f"[V2X] Overtaking COMPLETE! d={min_d:.1f}m. Back to NORMAL.")
-            else:
-                # 追い越し中は速度制限しない
-                self._v2x_speed_limit = float('inf')
-
-        # NORMAL: 制限なし
-        else:
-            self._v2x_mode = "NORMAL"
-            self._v2x_speed_limit = float('inf')
-            self._v2x_following_since = None
-            self._v2x_emergency_brake_since = None
+        self._v2x_manager.update(
+            now_sec=self.get_clock().now().nanoseconds / 1e9,
+            ego_x=ego_x,
+            ego_y=ego_y,
+            ego_yaw=ego_yaw,
+            ego_speed_mps=ego_speed_mps,
+            ego_wp_id=self._car.wp_id,
+            tracker=self._v2x_tracker,
+            reference_path=self._reference_path,
+            car=self._car,
+            v2x_cfg=self._cfg.v2x_obstacle_avoidance,
+            mpc_v_max=self._mpc_cfg.v_max,
+            vehicle_radius_normal=self._v2x_vehicle_radius_normal
+        )
 
     def _filter_obstacles_to_corridor(self, obstacles: List[Obstacle]) -> List[Obstacle]:
         if not obstacles:
@@ -1260,164 +1051,43 @@ class MPCController(Node):
         kappa_for_mpc = np.tan(u[1]) / self._car.length
         self._mpc.set_previous_steering(kappa_for_mpc)
 
-        # --- Stuck Recovery Logic ---
+        # --- Stuck Recovery Logic (Delegated to StuckRecoveryManager) ---
+        now_sec = now.nanoseconds / 1e9
         stuck_cfg = getattr(self._cfg, 'stuck_recovery', None)
-        enable_stuck_rec = getattr(stuck_cfg, 'enable_stuck_recovery', True) if stuck_cfg else True
 
-        if enable_stuck_rec and self._enable_control:
-            stuck_vel_thresh = float(getattr(stuck_cfg, 'stuck_velocity_threshold', 0.15)) if stuck_cfg else 0.15
-            stuck_time_thresh = float(getattr(stuck_cfg, 'stuck_time_threshold', 3.0)) if stuck_cfg else 3.0
-            rev_speed = float(getattr(stuck_cfg, 'reverse_speed', -2.5)) if stuck_cfg else -2.5
-            rev_duration = float(getattr(stuck_cfg, 'reverse_duration', 2.0)) if stuck_cfg else 2.0
-            stop_duration = float(getattr(stuck_cfg, 'stop_duration', 0.4)) if stuck_cfg else 0.4
+        if abs(v) > 0.5:
+            self._has_launched = True
 
-            now_sec = now.nanoseconds / 1e9
+        stuck_out = self._stuck_manager.update(
+            now_sec=now_sec,
+            v_curr=v,
+            u_cmd=(u[0], u[1]),
+            is_colliding=is_colliding,
+            enable_control=self._enable_control,
+            has_launched=self._has_launched,
+            odom=self._odom,
+            tracker=self._v2x_tracker if hasattr(self, '_v2x_tracker') else None,
+            car=self._car,
+            mpc=self._mpc,
+            stuck_cfg=stuck_cfg
+        )
 
-            # 発進完了判定: 一度でも車速 0.5 m/s を超えたら発進完了とみなす
-            if abs(v) > 0.5:
-                self._has_launched = True
+        if stuck_out.post_recovery_lock_requested:
+            v2x_cfg = getattr(self._cfg, 'v2x_obstacle_avoidance', None)
+            v_rad_ot = float(getattr(v2x_cfg, 'vehicle_radius_overtake', 0.65)) if v2x_cfg else 0.65
+            self._v2x_manager.lock_overtaking(now_sec + 10.0, radius=v_rad_ot)
 
-            # 制御無効時または未発進（かつ非衝突）状態ではスタックタイマーをリセット
-            if not self._enable_control or (not self._has_launched and not is_colliding):
-                self._stuck_timer_start = None
-
-            elif self._stuck_state == "NORMAL":
-                # 壁衝突時: abs(v) <= 0.8 m/s かつ 0.5秒継続で即座にリカバリー発動
-                # 非衝突時: 発進完了後 (self._has_launched) かつ前進指示中 (u[0] > 0.5) で abs(v) <= stuck_vel_thresh が stuck_time_thresh 秒継続で発動
-                is_stuck_candidate = (
-                    (is_colliding and abs(v) <= 0.8) or
-                    (self._has_launched and abs(v) <= stuck_vel_thresh and u[0] > 0.5)
-                )
-
-                req_time = 0.5 if is_colliding else stuck_time_thresh
-
-                if is_stuck_candidate:
-                    if self._stuck_timer_start is None:
-                        self._stuck_timer_start = now_sec
-                    elif (now_sec - self._stuck_timer_start) >= req_time:
-                        self._stuck_state = "BRAKE_BEFORE_REVERSE"
-                        self._stuck_phase_start = now_sec
-
-                        # 連続スタック判定・エスカレーションロジック
-                        if self._last_stuck_recovery_time is not None and (now_sec - self._last_stuck_recovery_time) < 15.0:
-                            self._stuck_retry_count += 1
-                        else:
-                            self._stuck_retry_count = 1
-                        self._last_stuck_recovery_time = now_sec
-
-                        if self._stuck_retry_count >= 2:
-                            # 2回目以上の連続スタック（コーナー内側引っかかり等の重度ケース）:
-                            # バック時間を 3.2秒に拡大し、手前の直線までしっかり下がる
-                            # 操舵角を 0.50rad (~29 deg) に大きく切る
-                            # 回避半径を 0.65m (すり抜け用コンパクト半径) に統一し、解不可(infeasible)と引っかかり直しを排除
-                            self._stuck_reverse_duration = 3.2
-                            rev_steer_angle = 0.50
-                            self._v2x_stuck_target_radius = 0.65
-                        else:
-                            # 1回目のスタック:
-                            # バック時間を 2.2秒、操舵角 0.40rad (~23 deg)
-                            # 回避半径を 0.65m (すり抜け用コンパクト半径)
-                            self._stuck_reverse_duration = max(2.2, rev_duration)
-                            rev_steer_angle = max(0.40, float(getattr(stuck_cfg, 'reverse_steer_angle', 0.35)) if stuck_cfg else 0.35)
-                            self._v2x_stuck_target_radius = 0.65
-
-                        # バック時回避操舵角の計算（前車の相対位置またはコース偏位に基づく切返し方向決定）
-                        lead_rel_y = 0.0
-                        found_lead = False
-                        if self._odom is not None and hasattr(self, '_v2x_tracker'):
-                            pose = odom_to_pose_2d(self._odom)
-                            ego_x, ego_y, ego_yaw = pose.x, pose.y, pose.theta
-                            fwd_sin, fwd_cos = math.sin(ego_yaw), math.cos(ego_yaw)
-                            left_cos, left_sin = -fwd_sin, fwd_cos
-
-                            min_d = float('inf')
-                            for vid in self._v2x_tracker.active_vehicle_ids():
-                                if vid == self._vehicle_id:
-                                    continue
-                                buf = self._v2x_tracker._samples.get(vid)
-                                if not buf:
-                                    continue
-                                _, ox, oy = buf[-1]
-                                dx, dy = ox - ego_x, oy - ego_y
-                                d = math.hypot(dx, dy)
-                                if 0.5 <= d < 15.0 and d < min_d:
-                                    lead_rel_y = dx * left_cos + dy * left_sin
-                                    min_d = d
-                                    found_lead = True
-
-                        if not found_lead:
-                            e_y_curr = self._mpc.model.spatial_state.e_y if self._mpc.model.spatial_state else 0.0
-                            lead_rel_y = e_y_curr
-
-                        # 前車が左側 (lead_rel_y > 0) -> バック時「左ステア (+rev_steer_angle)」でノーズを右へ振る
-                        # 前車が右側 (lead_rel_y <= 0) -> バック時「右ステア (-rev_steer_angle)」でノーズを左へ振る
-                        self._stuck_evasive_steer = rev_steer_angle if lead_rel_y > 0 else -rev_steer_angle
-
-                        self.get_logger().warn(
-                            f"[STUCK RECOVERY] Stuck detected (try #{self._stuck_retry_count})! (v={v:.2f} m/s, colliding={is_colliding}, duration={now_sec - self._stuck_timer_start:.1f}s). "
-                            f"Reverse dur={self._stuck_reverse_duration:.1f}s steer={self._stuck_evasive_steer:.2f} rad rad_target={self._v2x_stuck_target_radius:.2f}m. Initiating reverse sequence...")
-                else:
-                    self._stuck_timer_start = None
-
-            elif self._stuck_state == "BRAKE_BEFORE_REVERSE":
-                elapsed = now_sec - (self._stuck_phase_start or now_sec)
-                if elapsed < stop_duration:
-                    u[0] = 0.0
-                    acc = -3.0
-                    u[1] = 0.0
-                    bug_acc_enabled = False
-                    self.get_logger().warn(f"[STUCK RECOVERY] Braking for reverse gear shift... ({elapsed:.1f}/{stop_duration:.1f}s)", throttle_duration_sec=0.3)
-                else:
-                    self._stuck_state = "REVERSING"
-                    self._stuck_phase_start = now_sec
-                    self.get_logger().warn(f"[STUCK RECOVERY] Shifted to REVERSE. Reversing with evasive steer {self._stuck_evasive_steer:.2f} rad...")
-
-            elif self._stuck_state == "REVERSING":
-                elapsed = now_sec - (self._stuck_phase_start or now_sec)
-                if elapsed < self._stuck_reverse_duration:
-                    u[0] = abs(rev_speed)
-                    acc = 1.5
-                    u[1] = self._stuck_evasive_steer
-                    bug_acc_enabled = False
-                    self.get_logger().warn(f"[STUCK RECOVERY] Reversing evasively... v_cmd={u[0]:.1f} m/s, steer={u[1]:.2f} rad ({elapsed:.1f}/{self._stuck_reverse_duration:.1f}s)", throttle_duration_sec=0.3)
-                else:
-                    self._stuck_state = "STOP_BEFORE_FORWARD"
-                    self._stuck_phase_start = now_sec
-                    self.get_logger().info("[STUCK RECOVERY] Reverse complete. Stopping before shifting forward...")
-
-            elif self._stuck_state == "STOP_BEFORE_FORWARD":
-                elapsed = now_sec - (self._stuck_phase_start or now_sec)
-                if elapsed < stop_duration:
-                    u[0] = 0.0
-                    acc = -1.0
-                    u[1] = 0.0
-                    bug_acc_enabled = False
-                else:
-                    self._car.update_reference_path(self._car.reference_path)
-                    self._stuck_state = "NORMAL"
-                    self._stuck_timer_start = None
-                    # Reset MPC internal state: during REVERSING, e_psi can be ~-140deg
-                    # which corrupts infeasibility_counter and current_control buffer.
-                    self._mpc.infeasibility_counter = 0
-                    self._mpc.current_control = np.zeros(self._mpc.current_control.shape)
-                    self._mpc.set_previous_steering(0.0)
-
-                    # Post-recovery: Force V2X mode to OVERTAKING with reduced radius and lock for 10 seconds
-                    v2x_cfg = getattr(self._cfg, 'v2x_obstacle_avoidance', None)
-                    v_rad_ot = float(getattr(v2x_cfg, 'vehicle_radius_overtake', 0.65)) if v2x_cfg else 0.65
-                    self._v2x_mode = "OVERTAKING"
-                    self._v2x_vehicle_radius = v_rad_ot
-                    self._v2x_speed_limit = float('inf')
-                    self._v2x_overtake_lock_until = now_sec + 10.0
-
-                    self.get_logger().warn("[STUCK RECOVERY] Resuming forward MPC control in OVERTAKING mode (LOCKED 10s)! (MPC state reset & evasive radius active)")
+        if stuck_out.override_control and stuck_out.u_override is not None:
+            u[0] = stuck_out.u_override[0]
+            u[1] = stuck_out.u_override[1]
+            acc = stuck_out.acc_override
+            bug_acc_enabled = stuck_out.bug_acc_enabled
 
         # update car state (use v for feedback actual speed)
         self._car.drive([v, u[1]])
 
         # Publish GearCommand (DRIVE = 2 / REVERSE = 20)
-        target_gear = GearCommand.REVERSE if self._stuck_state in ["BRAKE_BEFORE_REVERSE", "REVERSING"] else GearCommand.DRIVE
-        self._publish_gear_command(target_gear)
+        self._publish_gear_command(stuck_out.gear_cmd)
 
         # Publish control command
         self._publish_control_command(now, u, acc, bug_acc_enabled)
