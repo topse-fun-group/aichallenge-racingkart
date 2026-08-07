@@ -105,6 +105,6 @@ stuck_recovery:
   stuck_velocity_threshold: 0.25   # [m/s] 完全静止レベル判定閾値
   stuck_time_threshold: 1.0        # [s] スタック判定時間
   reverse_speed: -2.5              # [m/s] バック時の目標速度 (約 -9.0 km/h)
-  reverse_duration: 2.0            # [s] バック継続時間
+  reverse_duration: 2.2            # [s] バック継続時間
   stop_duration: 0.4               # [s] ギアシフト・確認停止時間
-  reverse_steer_angle: 0.35        # [rad] (約20度) バック時回避切返し操舵角
+  reverse_steer_angle: 0.40        # [rad] (約23度) バック時回避切返し操舵角
