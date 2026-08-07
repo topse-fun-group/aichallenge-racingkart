@@ -347,6 +347,7 @@ class MPC:
             reference_waypoint=self.model.current_waypoint)
 
         self._extra_corridor_margin = 0.0
+        self.corridor_relaxation_active = False
         self._init_problem(N, self.model.safety_margin)
 
         try:
@@ -380,11 +381,13 @@ class MPC:
                             self._init_problem(N, 0.0)
                             dec = self.optimizer.solve()
                             if dec.info.status == 'solved':
+                                self.corridor_relaxation_active = True
                                 print(f'[MPC] Solved with corridor_relaxation +{self._extra_corridor_margin:.1f}m at wp_id={self.model.wp_id}')
                                 break
                         else:
                             self.max_steering_rate = saved_steer_rate
                             self._extra_corridor_margin = 0.0
+                            self.corridor_relaxation_active = False
                             raise TypeError('OSQP solve failed after relaxation')
                     self.max_steering_rate = saved_steer_rate
                     self._extra_corridor_margin = 0.0

@@ -186,10 +186,29 @@ class V2XModeManager:
         denom_follow = max(0.001, follow_start - follow_brake)
 
         # Mode Transition Logic
-        if (is_stationary_lead or should_direct_overtake) and self.mode in ("NORMAL", "FOLLOWING", "EMERGENCY_BRAKE"):
+        if self.mode == "OVERTAKING":
+            self.emergency_brake_since = None
+            # 静止・極低速他車へのアプローチ中（d < 8.0mかつ lead_speed < 2.0m/s）：
+            # 急な最高速突入による衝突を防ぎ、MPC 回避操舵の時間的余裕を確保するため速度を段階制限（10.0〜15.0 km/h）
+            if is_leading_ahead and lead_speed < 2.0 and min_d < 8.0:
+                safe_approach_v = max(kmh_to_m_per_sec(10.0), lead_speed + kmh_to_m_per_sec(6.0))
+                self.speed_limit = min(v_max_normal, safe_approach_v)
+            else:
+                self.speed_limit = float('inf')
+
+            # 追い越し完了条件（前方車両をクリア、または障害物エリア脱出）
+            if not is_leading_ahead or min_d >= overtake_clearance:
+                self.mode = "NORMAL"
+                self.vehicle_radius = vehicle_radius_normal
+                self.speed_limit = float('inf')
+                self.following_since = None
+                self._log('info', f"[V2X] Overtaking COMPLETE! d={min_d:.1f}m. Back to NORMAL.")
+
+        elif (is_stationary_lead or should_direct_overtake) and self.mode in ("NORMAL", "FOLLOWING", "EMERGENCY_BRAKE"):
             self.mode = "OVERTAKING"
             self.vehicle_radius = vehicle_radius_overtake
-            self.speed_limit = float('inf')
+            safe_approach_v = max(kmh_to_m_per_sec(10.0), lead_speed + kmh_to_m_per_sec(6.0)) if min_d < 8.0 else float('inf')
+            self.speed_limit = min(v_max_normal, safe_approach_v)
             self.emergency_brake_since = None
             self._log('info',
                 f"[V2X] Instant Direct OVERTAKING (Stationary/Stuck Lead Avoidance): d={min_d:.1f}m lead_v={lead_speed*3.6:.1f}km/h rad={self.vehicle_radius:.2f}m",
@@ -219,7 +238,8 @@ class V2XModeManager:
             if is_stationary_lead or eb_duration >= overtake_patience:
                 self.mode = "OVERTAKING"
                 self.vehicle_radius = vehicle_radius_overtake
-                self.speed_limit = float('inf')
+                safe_approach_v = max(kmh_to_m_per_sec(10.0), lead_speed + kmh_to_m_per_sec(6.0)) if min_d < 8.0 else float('inf')
+                self.speed_limit = min(v_max_normal, safe_approach_v)
                 self.emergency_brake_since = None
                 self._log('info',
                     f"[V2X] EMERGENCY_BRAKE -> OVERTAKING (Immediate Stationary bypass): dur={eb_duration:.1f}s d={min_d:.1f}m rad={self.vehicle_radius:.2f}m")
@@ -257,19 +277,9 @@ class V2XModeManager:
                 if (following_duration >= overtake_patience and min_d <= overtake_gap_min):
                     self.mode = "OVERTAKING"
                     self.vehicle_radius = vehicle_radius_overtake
-                    self.speed_limit = float('inf')
+                    safe_approach_v = max(kmh_to_m_per_sec(10.0), lead_speed + kmh_to_m_per_sec(6.0)) if min_d < 8.0 else float('inf')
+                    self.speed_limit = min(v_max_normal, safe_approach_v)
                     self._log('info', f"[V2X] OVERTAKING: following={following_duration:.1f}s d={min_d:.1f}m")
-
-        elif self.mode == "OVERTAKING":
-            self.emergency_brake_since = None
-            if not is_leading_ahead and min_d >= overtake_clearance:
-                self.mode = "NORMAL"
-                self.vehicle_radius = vehicle_radius_normal
-                self.speed_limit = float('inf')
-                self.following_since = None
-                self._log('info', f"[V2X] Overtaking COMPLETE! d={min_d:.1f}m. Back to NORMAL.")
-            else:
-                self.speed_limit = float('inf')
 
         else:
             self.mode = "NORMAL"

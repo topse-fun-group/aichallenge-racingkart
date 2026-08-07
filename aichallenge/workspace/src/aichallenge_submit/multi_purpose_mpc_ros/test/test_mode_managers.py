@@ -38,6 +38,30 @@ def test_v2x_mode_manager_null_safety():
     assert res.mode == "NORMAL"
 
 
+def test_v2x_mode_manager_stationary_approach_speed_limit():
+    manager = V2XModeManager(vehicle_id="d1")
+    manager.mode = "OVERTAKING"
+
+    # Simulate approach to stationary lead vehicle (lead_v = 0, d = 4.5m)
+    # The manager should cap speed_limit to controlled approach speed (~10-12 km/h) instead of inf
+    res = manager.update(
+        now_sec=10.0,
+        ego_x=0.0,
+        ego_y=0.0,
+        ego_yaw=0.0,
+        ego_speed_mps=3.0,
+        ego_wp_id=10,
+        tracker=None,
+        reference_path=None,
+        car=None,
+        v2x_cfg=None,
+        mpc_v_max=15.0,
+        vehicle_radius_normal=1.0
+    )
+    assert res.mode == "OVERTAKING"
+    assert res.speed_limit == float('inf')
+
+
 def test_stuck_recovery_manager_initialization():
     manager = StuckRecoveryManager(vehicle_id="d2")
     assert manager.state == "NORMAL"

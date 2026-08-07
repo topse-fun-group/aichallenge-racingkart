@@ -959,7 +959,12 @@ class MPCController(Node):
             # Skip MPC computation during STUCK RECOVERY: vehicle may be reversing (e_psi ~-140deg)
             # which would corrupt infeasibility_counter and current_control buffer with invalid state.
             if self._stuck_state == "NORMAL":
-                u, max_delta = self._mpc.get_control()
+                try:
+                    u, max_delta = self._mpc.get_control()
+                except Exception as e:
+                    self.get_logger().error(f"[MPC EXCEPTION] OSQP solver error: {e}. Fallback to zero command.", throttle_duration_sec=1.0)
+                    u, max_delta = np.array([0.0, 0.0]), 0.0
+
                 mpc_raw_steer = u[1]  # Save raw MPC output for diagnostics
                 # initial_smooth_blend: Start-up protection preventing initial straight steering chatter
                 if self._loop < 120:
@@ -985,6 +990,14 @@ class MPCController(Node):
             v_max_effective = max(self._v2x_speed_limit, 0.0)
             self.get_logger().info(
                 f"[V2X] Applying speed limit: mode={self._v2x_mode} v_lim={v_max_effective:.2f} m/s (base={base_v_max_mps:.2f} m/s)",
+                throttle_duration_sec=1.0)
+
+        # MPC コリドー緩和 (corridor_relaxation) 発動時の安全低速化制御:
+        # コリドーが一時拡張された場合、過剰高速での障害物突入を防ぐため上限速度を 10.0 km/h (2.78 m/s) に抑制
+        if getattr(self._mpc, 'corridor_relaxation_active', False):
+            v_max_effective = min(v_max_effective, kmh_to_m_per_sec(10.0))
+            self.get_logger().warn(
+                f"[MPC CORRIDOR] Relaxation active: Capping speed to {v_max_effective*3.6:.1f} km/h for safe obstacle bypass",
                 throttle_duration_sec=1.0)
 
         # MPCとウェイポイントの目標速度を更新

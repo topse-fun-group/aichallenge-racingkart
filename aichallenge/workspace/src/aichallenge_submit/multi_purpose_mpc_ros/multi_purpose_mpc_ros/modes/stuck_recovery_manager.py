@@ -66,6 +66,7 @@ class StuckRecoveryManager:
         self.reverse_duration: float = 2.2
         self.evasive_steer: float = 0.35
         self.stuck_target_radius: float = 0.65
+        self.post_recovery_immunity_until: Optional[float] = None
 
     def _log(self, level: str, msg: str, throttle_duration_sec: Optional[float] = None) -> None:
         if not self.logger:
@@ -108,6 +109,14 @@ class StuckRecoveryManager:
             self.timer_start = None
 
         elif self.state == "NORMAL":
+            # 復帰完了後の3.0秒間クーリング期間（発進加速中の低速による誤再判定防止）
+            if self.post_recovery_immunity_until is not None:
+                if now_sec < self.post_recovery_immunity_until and not is_colliding:
+                    self.timer_start = None
+                    return StuckRecoveryOutput(state="NORMAL", override_control=False, gear_cmd=GearCommand.DRIVE)
+                elif now_sec >= self.post_recovery_immunity_until:
+                    self.post_recovery_immunity_until = None
+
             is_stuck_candidate = (
                 (is_colliding and abs(v_curr) <= 0.8) or
                 (has_launched and abs(v_curr) <= max(stuck_vel_thresh, 0.35))
@@ -230,6 +239,7 @@ class StuckRecoveryManager:
                     car.update_reference_path(car.reference_path)
                 self.state = "NORMAL"
                 self.timer_start = None
+                self.post_recovery_immunity_until = now_sec + 3.0
 
                 if mpc is not None:
                     mpc.infeasibility_counter = 0

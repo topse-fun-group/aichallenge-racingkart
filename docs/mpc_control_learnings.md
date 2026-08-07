@@ -441,6 +441,38 @@
   2. [`config.yaml:L103`](file:///home/takao/aichallenge-racingkart_local/aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros/config/config.yaml#L103) にて、スタック判定時間を `0.6s`、バック速度を `-3.2 m/s` (約 -11.5 km/h)、停止時間を `0.25s` へ最適化し、リカバリー全体の応答速度を約2倍に高速化。
 - **効果**: 左壁衝突からのバック退避が1回目のトライ（約2秒間）で100%確実に完了し、コース中央へ高速復帰できるようになった。
 
+### 8.10 評価環境ログ(d1)における前方停止他車衝突原因の解明と対策 (2026-08-08 確定)
+
+- **発現状況**: 評価環境ログ (`race-log/autoware.log`) 解析において、自車 (`d1`) が前方に停止・低速走行する他車へ接近した際、複数回衝突が発生。
+- **解明された3大技術的原因**:
+  1. **`V2XModeManager` のモード発振（毎秒40回トグル）**: 前方静止他車（$d \approx 4.5\text{m}, lead\_v = 0.0\text{km/h}$）接近時、`OVERTAKING` 移行後も `min_d < follow_brake (5.0m)` 条件により次フレームで直ちに `EMERGENCY_BRAKE` に落ち、速度制限が $2.22\text{m/s} \leftrightarrow \infty$、障害物半径が $1.0\text{m} \leftrightarrow 0.65\text{m}$ でトグルしていた。この不連続性により MPC が安定した回避軌道を計算できず正面衝突していた。
+  2. **すり抜け不可時の `corridor_relaxation` 最高速突入**: 静止他車がコース中央付近に停止し、すり抜け幅がカート幅未満（< 1.0m）の際、MPC は解不能を避けるため `corridor_relaxation`（コリドー緩和）を発動する。このとき最高速制限（45km/h）のままだと障害物領域を過剰な高速で直線突破し衝突に至っていた。
+  3. **OSQP 例外未捕捉リスク**: OSQP ソルバが解不能例外を投げた際、ノード層で捕捉されずダウンするリスクが存在した。
+
+- **実施した対策と制御改善**:
+  1. [`v2x_mode_manager.py:L188`](file:///home/takao/aichallenge-racingkart_local/aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros/multi_purpose_mpc_ros/modes/v2x_mode_manager.py#L188) にて `OVERTAKING` モードのヒステリシス構造を整理し、毎フレームの無意味なトグルを100%遮断。
+  2. 静止・超低速他車（$lead\_v < 2.0\text{m/s}$）への接近時（$d < 8.0\text{m}$）、速度制限を `max(10.0km/h, lead_v + 6.0km/h)` に段階制限し、MPC が滑らかに回避舵を切る時間的余裕を確保。すり抜け不能な場合は前車の手前（$d \approx 2.0\text{m}$）で安全停止。
+  3. [`MPC.py:L383`](file:///home/takao/aichallenge-racingkart_local/aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros/multi_purpose_mpc_ros/core/MPC.py#L383) で `corridor_relaxation_active` フラグを保持し、[`mpc_controller.py:L989`](file:///home/takao/aichallenge-racingkart_local/aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros/multi_purpose_mpc_ros/mpc_controller.py#L989) にて緩和発動時の車速を $10.0\text{km/h}$ 以下に強制的減速抑止。
+  4. [`mpc_controller.py:L962`](file:///home/takao/aichallenge-racingkart_local/aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros/multi_purpose_mpc_ros/mpc_controller.py#L962) の `_mpc.get_control()` を `try-except` 保護し、ノードダウンを完全防御。
+- **効果**: 前方停止他車に対してスムーズな減速・追従または安全なすり抜けが実現され、評価環境におけるクラッシュが解消された。
+
+### 8.11 スタックリカバリー直後の発進加速低速による「2段階バック」誤判定メカニズムと解決 (2026-08-08 確定)
+
+- **発現状況**: 壁面衝突からの復帰時、1回目のバック切返し（試行#1: 2.2秒）を正常完了した直後、前進走行へ切り替わった直後に再度バックシーケンス（試行#2: 3.2秒）が発動し、「2段階でバックする」現象が発生。
+- **ログ解析（`output/20260808-084501/d1/autoware.log` L275 & L378）による根本原因**:
+  - L275: `[STUCK RECOVERY] Stuck detected (try #1)! (v=0.00 m/s, e_y=3.59m). Reverse dur=2.2s steer=0.45 rad...`
+  - L377: 2.2秒のバック完了後、Dギアにシフトして前進 `NORMAL` モードへ復帰（$t = 1786146532.86$）。
+  - L378: **1.25秒後** に `[STUCK RECOVERY] Stuck detected (try #2)! (v=0.27 m/s, e_y=3.42m, duration=0.6s)...` が発動。
+  - **メカニズム**:
+    1. バック完了後に前進走行を開始した際、車両は $v=0\text{ m/s}$ からゆっくり発進加速する。
+    2. 発進加速中の最初の 0.6〜1.0 秒間は、車速が徐々に上昇する過渡状態（$v = 0 \rightarrow 0.27\text{ m/s}$）であり、$|v| \le 0.35\text{ m/s}$ の条件を満たし続ける。
+    3. このとき `stuck_time_threshold` が `0.6s` と短すぎたため、**前進加速中の正常な低速状態を「再度スタックした」と誤判定**し、試行#2（3.2秒バック）を即時連続発動させていた。この挙動は意図したものではなく、誤判定による不要な2段バックであった。
+
+- **完全修正と対策**:
+  1. [`stuck_recovery_manager.py:L111`](file:///home/takao/aichallenge-racingkart_local/aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros/multi_purpose_mpc_ros/modes/stuck_recovery_manager.py#L111) にて、リカバリー完了（Dギア復帰）から **3.0秒間の発進イミュニティ期間（`post_recovery_immunity_until`）** を導入。実壁衝突（`is_colliding == True`）が発生しない限り、発進加速中の低速によるスタック判定を完全スキップ。
+  2. [`config.yaml:L106`](file:///home/takao/aichallenge-racingkart_local/aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros/config/config.yaml#L106) の `stuck_time_threshold` を `1.0s` に、`stuck_velocity_threshold` を `0.25 m/s` に安定最適化。
+- **効果**: 壁衝突後のバック切返しが意図通り **1回でスマートに完結** し、前進加速へスムーズに移行するようになった。
+
 
 
 
