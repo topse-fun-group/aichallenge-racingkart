@@ -102,9 +102,9 @@ v2x_obstacle_avoidance:
 
 stuck_recovery:
   enable_stuck_recovery: true
-  stuck_velocity_threshold: 0.25   # [m/s] 完全静止レベル判定閾値
-  stuck_time_threshold: 1.0        # [s] スタック判定時間
-  reverse_speed: -2.5              # [m/s] バック時の目標速度 (約 -9.0 km/h)
-  reverse_duration: 2.2            # [s] バック継続時間
-  stop_duration: 0.4               # [s] ギアシフト・確認停止時間
-  reverse_steer_angle: 0.40        # [rad] (約23度) バック時回避切返し操舵角
+  stuck_velocity_threshold: 0.35   # [m/s] 完全静止レベル判定閾値
+  stuck_time_threshold: 0.6        # [s] スタック判定時間（0.6sへ高速化）
+  reverse_speed: -3.2              # [m/s] バック時の目標速度 (約 -11.5 km/h へ高速化)
+  reverse_duration: 1.8            # [s] バック継続時間
+  stop_duration: 0.25              # [s] ギアシフト・確認停止時間
+  reverse_steer_angle: 0.45        # [rad] (約26度) バック時回避切返し操舵角
