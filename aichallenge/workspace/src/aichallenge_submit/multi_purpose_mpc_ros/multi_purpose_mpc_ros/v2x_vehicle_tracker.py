@@ -104,6 +104,12 @@ def predictions_to_obstacles(predictions, vehicle_radius: float, obstacle_cls=No
         from multi_purpose_mpc_ros.core.map import Obstacle as obstacle_cls
     out = []
     for _vid, points in predictions.items():
-        for x, y in points:
+        # 同一/近接予測座標の重複除去 (20重登録によるマップ領域爆発膨張と回避境界自壊を完全排斥)
+        unique_pts = []
+        for pt in points:
+            if not any(math.hypot(pt[0] - up[0], pt[1] - up[1]) < 0.1 for up in unique_pts):
+                unique_pts.append(pt)
+
+        for x, y in unique_pts:
             out.append(obstacle_cls(cx=x, cy=y, radius=vehicle_radius))
     return out

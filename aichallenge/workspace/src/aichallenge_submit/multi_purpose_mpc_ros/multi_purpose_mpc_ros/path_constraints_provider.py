@@ -91,9 +91,9 @@ class PathConstraintsProvider(Node):
         return cfg
 
     def _setup_pub_sub(self) -> None:
-        # Subscribers
+        from rclpy.qos import qos_profile_sensor_data
         self._obstacles_sub = self.create_subscription(
-            Float64MultiArray, "/aichallenge/objects", self._obstacles_callback, 1)
+            Float64MultiArray, "/aichallenge/objects", self._obstacles_callback, qos_profile_sensor_data)
 
         latching_qos = QoSProfile(depth=1, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
         self._path_constraints_pub = self.create_publisher(
@@ -123,7 +123,7 @@ class PathConstraintsProvider(Node):
             is_ref_path_given = cfg_ref_path.csv_path != "" # type: ignore
             if is_ref_path_given:
                 print("Using given reference path")
-                wp_x, wp_y, _, _ = load_ref_path(self.in_pkg_share(self._cfg.reference_path.csv_path)) # type: ignore
+                wp_x, wp_y, _, wp_kappa = load_ref_path(self.in_pkg_share(self._cfg.reference_path.csv_path)) # type: ignore
                 return ReferencePath(
                     map,
                     wp_x,
@@ -131,7 +131,8 @@ class PathConstraintsProvider(Node):
                     cfg_ref_path.resolution,
                     cfg_ref_path.smoothing_distance,
                     cfg_ref_path.max_width,
-                    cfg_ref_path.circular)
+                    cfg_ref_path.circular,
+                    wp_kappa=wp_kappa)
 
             else:
                 print("Using waypoints to create reference path")

@@ -23,7 +23,7 @@ reference_path:
   update_by_topic: false # When true, 'circle' must be false
   # path from pkg share dir
   # csv_path: ""
-  csv_path: "env/final_ver3/traj_out_in_middle.csv"
+  csv_path: "env/final_ver3/traj_mincurv_optimized.csv"
   resolution: 0.4
   smoothing_distance: 3
   max_width: 3.0
@@ -55,7 +55,7 @@ mpc:
   # accel_low_pass_gain: 0.1
   # steer_low_pass_gain: 0.3
   accel_low_pass_gain: 1.0
-  steer_low_pass_gain: 0.90 # Near zero-phase-lag output (delay compensation handles smoothness)
+  steer_low_pass_gain: 0.60 # Smooth output filtering eliminating straight-line micro oscillations
   wp_id_offset: 1            # 80-100ms lookahead offset compensating system latency
   use_max_kappa_pred: false
   delay_compensation_sec: 0.10             # [s] 100ms steering latency compensation for early turn-in
@@ -97,7 +97,7 @@ v2x_obstacle_avoidance:
   vehicle_radius_overtake: 0.65 # [m] 追い越し中の障害物半径（0.65mに調整し横抜け時の角すれ違い安全性を確保）
   overtake_speed_diff_threshold: 3.0 # [m/s] (約10.8km/h) 自車・前車の速度差がこれ以上でダイレクト OVERTAKING 遷移
   cross_velocity_threshold: 2.5 # [m/s] (約9.0km/h) 前車がこれ以上の横方向速度で自車前方を横切っている場合はダイレクト OVERTAKING をブロック
-  wp_lookahead_max: 30         # [WP] 同一コース沿道判定の最大先読みウェイポイント数（壁裏車を除外）
+  wp_lookahead_max: 45         # [WP] 同一コース沿道判定の最大先読みウェイポイント数（18m先まで拡大しスタック車を早期検出）
   wp_dist_max: 2.5             # [m] 他車座標から最寄ウェイポイントまでの最大離れ距離（コース外・壁裏を除外）
 
 stuck_recovery:

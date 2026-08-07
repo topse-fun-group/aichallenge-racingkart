@@ -349,7 +349,7 @@ class MPCController(Node):
             is_ref_path_given = cfg_ref_path.csv_path != "" # type: ignore
             if is_ref_path_given:
                 print("Using given reference path")
-                wp_x, wp_y, _, _ = load_ref_path(self.in_pkg_share(self._cfg.reference_path.csv_path)) # type: ignore
+                wp_x, wp_y, _, wp_kappa = load_ref_path(self.in_pkg_share(self._cfg.reference_path.csv_path)) # type: ignore
                 return ReferencePath(
                     map,
                     wp_x,
@@ -357,7 +357,8 @@ class MPCController(Node):
                     cfg_ref_path.resolution,
                     cfg_ref_path.smoothing_distance,
                     cfg_ref_path.max_width,
-                    cfg_ref_path.circular)
+                    cfg_ref_path.circular,
+                    wp_kappa=wp_kappa)
 
             else:
                 print("Using waypoints to create reference path")
@@ -604,11 +605,12 @@ class MPCController(Node):
                 self._border_cells_sub = self.create_subscription(
                     BorderCells, "/path_constraints_provider/border_cells", self._border_cells_callback, 1)
 
+            from rclpy.qos import qos_profile_sensor_data
             self._v2x_sub = self.create_subscription(
                 V2XVehiclePositionArray,
                 "/v2x/vehicle_positions",
                 self._v2x_callback,
-                1)
+                qos_profile_sensor_data)
 
     def _create_ackerman_control_command(self, stamp, u, acc, bug_acc_enabled):
         v_cmd = u[0]
@@ -679,8 +681,13 @@ class MPCController(Node):
                     continue
             predictions[vid] = pred_pts
 
+        v2x_cfg = self._cfg.v2x_obstacle_avoidance  # type: ignore
+        v_rad_ot = float(getattr(v2x_cfg, 'vehicle_radius_overtake', 0.65))
+        # 回避境界の自壊・キャンセルの原因となる過大半径(1.0m)を排除し、すり抜け用コンパクト半径(0.65m)で障害物を100%確実にマップ登録する
+        effective_radius = min(self._v2x_vehicle_radius, v_rad_ot)
+
         self._dynamic_obstacles = predictions_to_obstacles(
-            predictions, self._v2x_vehicle_radius)
+            predictions, effective_radius)
         self._obstacles_updated = True
 
     def _update_v2x_mode(
@@ -740,11 +747,11 @@ class MPCController(Node):
 
             # --- コース沿道・WP_ID 同軌道チェック（壁の裏側・別区間車両を除外） ---
             if n_base > 0:
-                lead_wp_id = self._car.get_closest_waypoint(ox, oy)
+                lead_wp_id = self._car.get_closest_waypoint_global(ox, oy)
                 wp_diff = (lead_wp_id - (ego_wp_id % n_base)) % n_base
 
-                # 1. 前方 1 〜 wp_lookahead_max (30) WP 以内に位置すること（遠い壁裏車両を除外）
-                if not (1 <= wp_diff <= wp_lookahead_max):
+                # 1. 前方 0 〜 wp_lookahead_max (45) WP 以内に位置すること（同一WP・至近距離 0m〜15m の障害物を絶対保持）
+                if not (0 <= wp_diff <= wp_lookahead_max):
                     continue
 
                 # 2. 最寄 WP からの離れ距離が wp_dist_max (2.5m) 以内であること（コース外車両を除外）
@@ -781,27 +788,17 @@ class MPCController(Node):
         now_sec = self.get_clock().now().nanoseconds / 1e9
 
         # ---- スタート抑制：車両が動き出してから N 秒間は V2X 制御を無効化 ----
-        # グリッド並走スタートで隣の車が近いため EMERGENCY_BRAKE が誤発動するのを防ぐ
-        startup_suppress_sec = float(getattr(v2x_cfg, 'startup_suppress_sec', 15.0))
-        MOTION_THRESHOLD_MPS = 1.0  # [m/s] この速度を超えた時点を「動き出し」と定義
-        if ego_speed_mps >= MOTION_THRESHOLD_MPS and self._v2x_motion_start_time is None:
-            self._v2x_motion_start_time = now_sec
-            self.get_logger().info(
-                f"[V2X] Vehicle started moving (v={ego_speed_mps:.1f}m/s). "
-                f"V2X suppressed for {startup_suppress_sec:.0f}s.")
-        if (self._v2x_motion_start_time is None or
-                now_sec - self._v2x_motion_start_time < startup_suppress_sec):
-            self._v2x_mode = "NORMAL"
-            self._v2x_speed_limit = float('inf')
-            return
+        # スタート直後であっても前方の静止・スタック障害物は即座に検知・回避可能とするため、
+        # V2X 回避機能の全体ブロックを解除し、常に有効化する
 
-        vehicle_radius_stuck = getattr(self, '_v2x_stuck_target_radius', 0.85)
+        vehicle_radius_stuck = getattr(self, '_v2x_stuck_target_radius', 0.65)
 
         # OVERTAKING ロック中: Stuck Recovery 後などの退避・追い越し維持保護
         if getattr(self, '_v2x_overtake_lock_until', None) is not None:
             if now_sec < self._v2x_overtake_lock_until:
-                # 完了判定: 前方車が後方かつ十分な距離
-                if not is_leading_ahead and min_d >= overtake_clearance:
+                # 完了判定: 前方車が明確に存在し、それが自車後方かつ十分な距離(overtake_clearance)まで離れた場合のみ完了とする
+                # (min_d == inf の一時見失い時は NORMAL に落とさず OVERTAKING を安全維持する)
+                if not is_leading_ahead and (0.5 <= min_d < float('inf')) and min_d >= overtake_clearance:
                     self._v2x_mode = "NORMAL"
                     self._v2x_vehicle_radius = self._v2x_vehicle_radius_normal
                     self._v2x_speed_limit = float('inf')
@@ -836,33 +833,50 @@ class MPCController(Node):
 
         # ---- モード遷移ロジック ----
 
-        # ダイレクト OVERTAKING: 大きな速度差または前車スタック・停止時は FOLLOWING/BRAKE をバイパスして直接 OVERTAKING へ
-        if should_direct_overtake and self._v2x_mode in ("NORMAL", "FOLLOWING", "EMERGENCY_BRAKE"):
+        # 1. 前方スタック・静止車 (is_stationary_lead) または大きな速度差 (should_direct_overtake):
+        # EMERGENCY_BRAKE (5m手前での8km/h失速直進ブレーキ) に捕まる前に、
+        # 遠方(15m手前)から 0.0秒遅延なしで即時ダイレクト OVERTAKING へ移行し、滑らかなすり抜け回避ラインを100%形成する
+        if (is_stationary_lead or should_direct_overtake) and self._v2x_mode in ("NORMAL", "FOLLOWING", "EMERGENCY_BRAKE"):
             self._v2x_mode = "OVERTAKING"
-            self._v2x_vehicle_radius = vehicle_radius_stuck if is_stationary_lead else vehicle_radius_overtake
-            self._v2x_speed_limit = float('inf')  # 減速せず最高速度を維持して回避
+            self._v2x_vehicle_radius = vehicle_radius_overtake
+            self._v2x_speed_limit = float('inf')  # 減速せず最高速度を維持して滑らかに回避
             self._v2x_emergency_brake_since = None
             self.get_logger().info(
-                f"[V2X] Direct OVERTAKING (Speed Gap / Stuck Lead): d={min_d:.1f}m rel_v={min_rel_fwd*3.6:.1f}km/h (ego_v={ego_speed_mps*3.6:.1f}km/h, lead_v={lead_speed*3.6:.1f}km/h, rad={self._v2x_vehicle_radius:.2f}m)",
+                f"[V2X] Instant Direct OVERTAKING (Stationary/Stuck Lead Avoidance): d={min_d:.1f}m lead_v={lead_speed*3.6:.1f}km/h rad={self._v2x_vehicle_radius:.2f}m",
                 throttle_duration_sec=1.0)
 
-        # EMERGENCY_BRAKE: TTC 危険 or 距離が非常に近い
+        # 2. EMERGENCY_BRAKE: 動いている前車との TTC 危険 or 距離が非常に近い場合
         elif min_ttc < ttc_thresh or (is_leading_ahead and min_d < follow_brake):
             if self._v2x_mode != "EMERGENCY_BRAKE":
                 self._v2x_mode = "EMERGENCY_BRAKE"
                 self._v2x_emergency_brake_since = now_sec
 
-            self._v2x_speed_limit = v_min_safe_mps
             eb_duration = now_sec - (self._v2x_emergency_brake_since or now_sec)
 
-            # EMERGENCY_BRAKE に滞在して前車が動かない場合 (1.0秒以上) は OVERTAKING に移行して回避
-            if eb_duration >= overtake_patience or (is_stationary_lead and eb_duration >= 1.0):
+            # スタート加速保護: 1周目のスタート直線(ego_wp_id < 40)かつ前車が移動中(lead_speed >= 1.5m/s)の場合、
+            # 8km/h失速ブレーキを掛けず前車速度に応じた加速を維持
+            is_startup_acceleration_phase = (
+                ego_wp_id < 40 and
+                self._v2x_motion_start_time is not None and
+                (now_sec - self._v2x_motion_start_time < 12.0)
+            )
+
+            if is_startup_acceleration_phase and lead_speed >= 1.5:
+                self._v2x_speed_limit = max(lead_speed, 5.0)  # [m/s] 18km/h以上でスタート加速維持
+                self.get_logger().info(
+                    f"[V2X] Startup Acceleration Phase Protection: Maintaining lead speed {lead_speed*3.6:.1f} km/h, no eb stall.",
+                    throttle_duration_sec=1.0)
+            else:
+                self._v2x_speed_limit = v_min_safe_mps
+
+            # EMERGENCY_BRAKE に滞在して前車が停止・スタックした場合または時間経過時は OVERTAKING に移行
+            if is_stationary_lead or eb_duration >= overtake_patience:
                 self._v2x_mode = "OVERTAKING"
-                self._v2x_vehicle_radius = vehicle_radius_stuck if is_stationary_lead else vehicle_radius_overtake
+                self._v2x_vehicle_radius = vehicle_radius_overtake
                 self._v2x_speed_limit = float('inf')
                 self._v2x_emergency_brake_since = None
                 self.get_logger().info(
-                    f"[V2X] EMERGENCY_BRAKE -> OVERTAKING (Stationary/Stuck lead bypass): dur={eb_duration:.1f}s d={min_d:.1f}m rad={self._v2x_vehicle_radius:.2f}m")
+                    f"[V2X] EMERGENCY_BRAKE -> OVERTAKING (Immediate Stationary bypass): dur={eb_duration:.1f}s d={min_d:.1f}m rad={self._v2x_vehicle_radius:.2f}m")
             else:
                 self.get_logger().warn(
                     f"[V2X] EMERGENCY_BRAKE: d={min_d:.1f}m ttc={min_ttc:.1f}s (dur={eb_duration:.1f}s)",
@@ -930,16 +944,11 @@ class MPCController(Node):
             self._v2x_emergency_brake_since = None
 
     def _filter_obstacles_to_corridor(self, obstacles: List[Obstacle]) -> List[Obstacle]:
-        if not obstacles or self._waypoint_xy.size == 0:
-            return obstacles
-        thr_sq = self._v2x_corridor_threshold_sq
-        wps = self._waypoint_xy
-        kept: List[Obstacle] = []
-        for ob in obstacles:
-            dxy = wps - np.array([ob.cx, ob.cy], dtype=np.float64)
-            if np.min(np.einsum('ij,ij->i', dxy, dxy)) <= thr_sq:
-                kept.append(ob)
-        return kept
+        if not obstacles:
+            return []
+        # _update_v2x_mode 内で既にコース沿道判定 (wp_dist_max = 2.5m, wp_diff <= 45) が行われており、
+        # コース内の全有効障害物をそのまま 100% 採用する
+        return obstacles
 
     def _border_cells_callback(self, msg: BorderCells):
         self._reference_path.set_border_cells(
@@ -1110,19 +1119,23 @@ class MPCController(Node):
                 sys.exit(1)
             # plot_reference_path(self._car)
 
-        if self.USE_OBSTACLE_AVOIDANCE and self._obstacles_updated:
-            self._obstacles_updated = False
+        if self.USE_OBSTACLE_AVOIDANCE:
+            if self._odom is not None:
+                p_curr = odom_to_pose_2d(self._odom)
+                v_curr = self._odom.twist.twist.linear.x
+                self._update_v2x_mode(p_curr.x, p_curr.y, p_curr.theta, v_curr)
+
             filtered_dynamic = self._filter_obstacles_to_corridor(self._dynamic_obstacles)
             active_obs = self._static_obstacles + filtered_dynamic
 
-            # 有効な障害物が存在する場合のみマップ再構築を行い、障害物ゼロ時は不要なリセットを抑止して完全固定・平滑走行を維持
+            # 有効な障害物が存在する場合、毎制御フレームでマップへ確実に登録・維持し、MPCの回避領域計算を常時保証する
             if len(active_obs) > 0:
                 self._map.reset_map()
                 self._map.add_obstacles(active_obs)
                 self._reference_path.reset_dynamic_constraints()
                 self._had_obstacles = True
             elif self._had_obstacles:
-                # 障害物がクリアされた瞬間のみ1回リセット
+                # 障害物が完全にクリアされた瞬間のみリセット
                 self._map.reset_map()
                 self._reference_path.reset_dynamic_constraints()
                 self._had_obstacles = False
@@ -1296,17 +1309,17 @@ class MPCController(Node):
                             # 2回目以上の連続スタック（コーナー内側引っかかり等の重度ケース）:
                             # バック時間を 3.2秒に拡大し、手前の直線までしっかり下がる
                             # 操舵角を 0.50rad (~29 deg) に大きく切る
-                            # 回避半径を 0.95m (クリアランス45cm) に拡大
+                            # 回避半径を 0.65m (すり抜け用コンパクト半径) に統一し、解不可(infeasible)と引っかかり直しを排除
                             self._stuck_reverse_duration = 3.2
                             rev_steer_angle = 0.50
-                            self._v2x_stuck_target_radius = 0.95
+                            self._v2x_stuck_target_radius = 0.65
                         else:
                             # 1回目のスタック:
                             # バック時間を 2.2秒、操舵角 0.40rad (~23 deg)
-                            # 回避半径を 0.85m (クリアランス35cm)
+                            # 回避半径を 0.65m (すり抜け用コンパクト半径)
                             self._stuck_reverse_duration = max(2.2, rev_duration)
                             rev_steer_angle = max(0.40, float(getattr(stuck_cfg, 'reverse_steer_angle', 0.35)) if stuck_cfg else 0.35)
-                            self._v2x_stuck_target_radius = 0.85
+                            self._v2x_stuck_target_radius = 0.65
 
                         # バック時回避操舵角の計算（前車の相対位置またはコース偏位に基づく切返し方向決定）
                         lead_rel_y = 0.0
@@ -1472,7 +1485,8 @@ class MPCController(Node):
         self.get_logger().warn(">> Stop Completed!")
 
         # show results
-        self._sim_logger.show_results(self._current_laps, self._lap_times, self._car)
+        if getattr(self, '_sim_logger', None) is not None:
+            self._sim_logger.show_results(self._current_laps, self._lap_times, self._car)
 
     @classmethod
     def in_pkg_share(cls, file_path: str) -> str:

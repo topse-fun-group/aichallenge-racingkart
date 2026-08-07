@@ -307,6 +307,31 @@ class SpatialBicycleModel(ABC):
             self.wp_id = prev_wp_id
             self.current_waypoint = self.reference_path.waypoints[prev_wp_id]
 
+    def get_closest_waypoint_global(self, x, y):
+        """
+        Get the index of the closest waypoint to given x, y coordinates across
+        a wide forward horizon (-10 to +60 waypoints = ~24m) for V2X obstacle matching.
+        """
+        n_wps = len(self.reference_path.waypoints)
+        if n_wps == 0:
+            return 0
+        n_base = getattr(self.reference_path, 'n_base_waypoints', n_wps) if getattr(self.reference_path, 'circular', False) else n_wps
+        curr_id = getattr(self, 'wp_id', 0) % n_base
+
+        # Forward extended search window (-10 to +60 waypoints = 24m)
+        window_indices = [(curr_id + i) % n_base for i in range(-10, 61)]
+        best_id = curr_id
+        min_dist_sq = float('inf')
+
+        for idx in window_indices:
+            wp = self.reference_path.waypoints[idx]
+            dist_sq = (wp.x - x)**2 + (wp.y - y)**2
+            if dist_sq < min_dist_sq:
+                min_dist_sq = dist_sq
+                best_id = idx
+
+        return best_id
+
     def get_closest_waypoint(self, x, y):
         """
         Get the index of the closest waypoint to the given x, y coordinates

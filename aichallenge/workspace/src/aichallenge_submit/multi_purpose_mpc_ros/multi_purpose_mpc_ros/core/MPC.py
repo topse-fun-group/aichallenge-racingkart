@@ -146,13 +146,14 @@ class MPC:
 
         # Update path constraints
         if self.use_obstacle_avoidance and not self.use_path_constraints_topic and len(self.model.reference_path.map.obstacles) > 0:
+            effective_safety_margin = max(safety_margin, 0.25)
             ub, lb, _ = self.model.reference_path.update_path_constraints(
-                start_wp_id + 1,
+                start_wp_id,
                 [self.model.temporal_state.x, self.model.temporal_state.y, self.model.temporal_state.psi],
-                N, self.model.length, self.model.width, safety_margin)
+                N, self.model.length, self.model.width, effective_safety_margin)
         else:
             if self.model.reference_path.path_constraints is not None:
-                ref_wp_id = (start_wp_id + 1) % len(self.model.reference_path.path_constraints[0])
+                ref_wp_id = start_wp_id % len(self.model.reference_path.path_constraints[0])
                 ub = self.model.reference_path.path_constraints[0][ref_wp_id]
                 lb = self.model.reference_path.path_constraints[1][ref_wp_id]
                 self.model.reference_path.border_cells.current_wp_id = ref_wp_id
@@ -161,8 +162,8 @@ class MPC:
                 # (already have safety margin applied via reset_dynamic_constraints)
                 wps = self.model.reference_path.waypoints
                 n_wps = len(wps)
-                ub = np.array([self.model.reference_path.get_waypoint(start_wp_id + 1 + i).ub_sm for i in range(N)])
-                lb = np.array([self.model.reference_path.get_waypoint(start_wp_id + 1 + i).lb_sm for i in range(N)])
+                ub = np.array([self.model.reference_path.get_waypoint(start_wp_id + i).ub_sm for i in range(N)])
+                lb = np.array([self.model.reference_path.get_waypoint(start_wp_id + i).lb_sm for i in range(N)])
 
             # Update safety margin if provided as argument and different from current value
             if self.model.safety_margin != safety_margin:
@@ -177,10 +178,10 @@ class MPC:
         e_y0 = self.model.spatial_state.e_y
         e_psi0 = self.model.spatial_state.e_psi
 
-        # dead_zone_filter: Suppress micro-noise chattering when vehicle is within ±3cm and ±0.5deg of target line
-        if abs(e_y0) < 0.03:
+        # dead_zone_filter: Suppress micro-noise chattering when vehicle is within ±5cm and ±1.0deg of target line
+        if abs(e_y0) < 0.05:
             e_y0 = 0.0
-        if abs(e_psi0) < 0.008:
+        if abs(e_psi0) < 0.017:
             e_psi0 = 0.0
 
         # Latency-Compensated State Prediction (Smith-Predictor structure):
@@ -203,33 +204,45 @@ class MPC:
             e_y_pred_step = e_y0_pred + (n + 1) * ds * np.sin(e_psi0_pred)
             margin = 0.4
 
-            # Smoothly relax bounds if e_y0_pred or e_y_pred_step exceeds nominal corridor
+            # Ensure bounds remain kinematically feasible over the full horizon without premature decay
             min_e_y = min(e_y0_pred, e_y_pred_step)
             max_e_y = max(e_y0_pred, e_y_pred_step)
 
-            if min_e_y < lb[n]:
-                decay = max(0.0, (15 - n) / 15.0)
-                lb[n] = min(lb[n], (1.0 - decay) * lb[n] + decay * (min_e_y - margin))
-            if max_e_y > ub[n]:
-                decay = max(0.0, (15 - n) / 15.0)
-                ub[n] = max(ub[n], (1.0 - decay) * ub[n] + decay * (max_e_y + margin))
+            if min_e_y - margin < lb[n]:
+                lb[n] = min_e_y - margin
+            if max_e_y + margin > ub[n]:
+                ub[n] = max_e_y + margin
+
+        # Apply extra corridor margin if requested during relaxation or if initial offset is large
+        auto_offset_margin = max(0.0, abs(e_y0_pred) + 0.6 - 1.5)
+        extra_corridor_margin = max(getattr(self, '_extra_corridor_margin', 0.0), auto_offset_margin)
+        if extra_corridor_margin > 0.0:
+            lb = lb - extra_corridor_margin
+            ub = ub + extra_corridor_margin
 
         # Update dynamic state constraints
         xmin_dyn[self.nx::self.nx] = lb
         xmax_dyn[self.nx::self.nx] = ub
-        # Initial state x0 constraint is strictly enforced via Aeq leq[0]/ueq[0] below (unconstrained in inequality block)
-        xmin_dyn[0] = -np.inf
-        xmax_dyn[0] = np.inf
+        # Initial state x0 constraint is strictly enforced via Aeq leq[0...nx-1]/ueq[0...nx-1] below (unconstrained in inequality block)
+        xmin_dyn[:self.nx] = -np.inf
+        xmax_dyn[:self.nx] = np.inf
 
-        # [DEBUG] print diagnostics on each new infeasibility event (commented out to save CPU/IO)
-        # if self.infeasibility_counter == 0:
-        #     print(f'[MPC_DBG] wp_id={self.model.wp_id} e_y0={e_y0:.4f} e_psi0={e_psi0:.4f} '
-        #           f'ub[0]={float(ub[0] if hasattr(ub,"__len__") else ub):.4f} '
-        #           f'lb[0]={float(lb[0] if hasattr(lb,"__len__") else lb):.4f} '
-        #           f'N={N} lb_shape={getattr(lb,"shape","scalar")} ub_shape={getattr(ub,"shape","scalar")}')
+        # Target reference trajectory (xr):
+        # Smooth Reference Merging Trajectory for Large Offsets (e.g. Off-center grid start or post-evasion):
+        # Instead of abruptly demanding e_y_ref = 0 at step 1 (which causes aggressive steering overshoot into opposite wall),
+        # generate a smooth exponential target decay e_y_ref(s) = e_y0_pred * exp(-s / tau_merge) over spatial horizon,
+        # with matching reference heading e_psi_ref(s) = arctan(-e_y_ref(s) / tau_merge).
+        if abs(e_y0_pred) > 0.80:
+            tau_merge = 7.0  # [m] spatial decay distance constant for smooth 15-20m merging
+            for n in range(1, N + 1):
+                s_dist = n * ds
+                ey_ref_n = e_y0_pred * np.exp(-s_dist / tau_merge)
+                epsi_ref_n = float(np.clip(np.arctan(-ey_ref_n / tau_merge), -0.40, 0.40))  # max ~23 deg heading
 
-        # Target lateral error e_y_ref = 0.0 (exact out-in-out reference path tracking)
-        xr[self.nx::self.nx] = 0.0
+                xr[n * self.nx] = ey_ref_n
+                xr[n * self.nx + 1] = epsi_ref_n
+        else:
+            xr[self.nx::self.nx] = 0.0
 
         # Get equality matrix
         Ax = sparse.kron(sparse.eye(N + 1), -sparse.eye(self.nx)) + sparse.csc_matrix(A)
@@ -281,8 +294,8 @@ class MPC:
             max_kappa_change_n = (self.max_steering_rate / self.model.length) * dt_n
             max_kappa_change_list.append(max_kappa_change_n)
 
-        # 直前の実ステアリング曲率 (previous_steering is already curvature kappa 1/m)
-        kappa_prev = self.previous_steering
+        # 直前の実ステアリング曲率 (previous_steering is already curvature kappa 1/m, clip to valid physical bounds)
+        kappa_prev = float(np.clip(self.previous_steering, umin[1] + 1e-4, umax[1] - 1e-4))
 
         lineq_rate = np.zeros(n_rate_constraints)
         uineq_rate = np.zeros(n_rate_constraints)
@@ -333,6 +346,7 @@ class MPC:
             reference_state=self.model.temporal_state,
             reference_waypoint=self.model.current_waypoint)
 
+        self._extra_corridor_margin = 0.0
         self._init_problem(N, self.model.safety_margin)
 
         try:
@@ -360,9 +374,20 @@ class MPC:
                             print(f'[MPC] Solved with steer_rate_relaxation x{1.0 + j*0.5:.1f} at wp_id={self.model.wp_id}')
                             break
                     else:
-                        self.max_steering_rate = saved_steer_rate
-                        raise TypeError('OSQP solve failed after relaxation')
+                        # Phase 3: relax corridor bounds dynamically (for recovery from collision / large deviation)
+                        for k in range(1, 5):
+                            self._extra_corridor_margin = k * 0.5  # +0.5m, +1.0m, +1.5m, +2.0m
+                            self._init_problem(N, 0.0)
+                            dec = self.optimizer.solve()
+                            if dec.info.status == 'solved':
+                                print(f'[MPC] Solved with corridor_relaxation +{self._extra_corridor_margin:.1f}m at wp_id={self.model.wp_id}')
+                                break
+                        else:
+                            self.max_steering_rate = saved_steer_rate
+                            self._extra_corridor_margin = 0.0
+                            raise TypeError('OSQP solve failed after relaxation')
                     self.max_steering_rate = saved_steer_rate
+                    self._extra_corridor_margin = 0.0
 
             control_signals = np.array(dec.x[-N*nu:])
             use_control_signals = control_signals[1::2]

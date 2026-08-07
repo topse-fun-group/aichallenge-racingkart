@@ -168,7 +168,7 @@ class BorderCells:
 
 class ReferencePath:
     def __init__(self, map, wp_x, wp_y, resolution, smoothing_distance,
-                 max_width, circular):
+                 max_width, circular, wp_kappa=None):
         """
         Reference Path object. Create a reference trajectory from specified
         corner points with given resolution. Smoothing around corners can be
@@ -182,6 +182,9 @@ class ReferencePath:
         path by averaging neighborhood of waypoints
         :param max_width: maximum width of path to both sides in m
         :param circular: True if path circular
+        :param wp_kappa: optional list of curvature values from CSV (kappa_radpm).
+        When provided, these high-quality curvature values are interpolated onto
+        the re-sampled waypoints instead of recomputing via noisy finite differences.
         """
 
         self.org_wp_x = wp_x
@@ -203,7 +206,7 @@ class ReferencePath:
         self.circular = circular
 
         # List of waypoint objects
-        self.waypoints = self._construct_path(wp_x, wp_y)
+        self.waypoints = self._construct_path(wp_x, wp_y, wp_kappa=wp_kappa)
 
         # Number of waypoints
         self.n_waypoints = len(self.waypoints)
@@ -244,13 +247,28 @@ class ReferencePath:
         for wp, v in zip(self.waypoints, v_ref):
             wp.v_ref = v
 
-    def _construct_path(self, wp_x, wp_y):
+    def _construct_path(self, wp_x, wp_y, wp_kappa=None):
         """
         Construct path from given waypoints.
         :param wp_x: x coordinates of waypoints in global coordinates
         :param wp_y: y coordinates of waypoints in global coordinates
+        :param wp_kappa: optional curvature values from CSV to interpolate
         :return: list of waypoint objects
         """
+
+        # Compute cumulative arc length of original CSV waypoints BEFORE any
+        # circular extension, so we can map each re-sampled waypoint back to
+        # the original kappa curve.
+        csv_s = None
+        csv_kappa = None
+        if wp_kappa is not None:
+            n_orig = len(wp_x)
+            csv_s = np.zeros(n_orig)
+            for i in range(1, n_orig):
+                csv_s[i] = csv_s[i - 1] + np.sqrt(
+                    (wp_x[i] - wp_x[i - 1]) ** 2 + (wp_y[i] - wp_y[i - 1]) ** 2
+                )
+            csv_kappa = np.array(wp_kappa[:n_orig])
 
         if self.circular:
             # If the last waypoint is a duplicate of the first waypoint (e.g. traj_mincurv.csv),
@@ -258,9 +276,13 @@ class ReferencePath:
             if len(wp_x) > 1 and dist(wp_x[0], wp_y[0], wp_x[-1], wp_y[-1]) < 1e-3:
                 wp_x = wp_x[:-1]
                 wp_y = wp_y[:-1]
+                if wp_kappa is not None:
+                    wp_kappa = wp_kappa[:-1]
             # insert the first smoothing_distance points to the end of the list
             wp_x = wp_x + wp_x[:self.smoothing_distance * 3]
             wp_y = wp_y + wp_y[:self.smoothing_distance * 3]
+            if wp_kappa is not None:
+                wp_kappa = wp_kappa + wp_kappa[:self.smoothing_distance * 3]
 
         # Number of waypoints
         n_wp = [max(1, int(np.sqrt((wp_x[i + 1] - wp_x[i]) ** 2 +
@@ -286,21 +308,41 @@ class ReferencePath:
             wp_ys.append(np.mean(wp_y[wp_id - self.smoothing_distance:wp_id
                                             + self.smoothing_distance + 1]))
 
+        # Interpolate CSV kappa onto the smoothed waypoints using arc-length mapping
+        kappa_interpolated = None
+        if csv_s is not None and csv_kappa is not None:
+            # Compute cumulative arc length of the smoothed waypoints
+            smooth_s = np.zeros(len(wp_xs))
+            for i in range(1, len(wp_xs)):
+                smooth_s[i] = smooth_s[i - 1] + np.sqrt(
+                    (wp_xs[i] - wp_xs[i - 1]) ** 2 + (wp_ys[i] - wp_ys[i - 1]) ** 2
+                )
+            # Interpolate CSV kappa values at each smoothed waypoint's arc-length position
+            # Clamp to the CSV arc-length range to handle circular extension
+            smooth_s_clamped = np.clip(smooth_s, csv_s[0], csv_s[-1])
+            kappa_interpolated = np.interp(smooth_s_clamped, csv_s, csv_kappa)
+
         # Construct list of waypoint objects
         waypoints = list(zip(wp_xs, wp_ys))
         # print(f"n_wp: {n_wp}, smooth_dist: {self.smoothing_distance}, len(wp_x): {len(wp_x)}, len way: {len(waypoints)}")
-        waypoints = self._construct_waypoints(waypoints)
+        waypoints = self._construct_waypoints(waypoints, kappa_interpolated=kappa_interpolated)
 
         return waypoints
 
-    def _construct_waypoints(self, waypoint_coordinates):
+    def _construct_waypoints(self, waypoint_coordinates, kappa_interpolated=None):
         """
         Reformulate conventional waypoints (x, y) coordinates into waypoint
         objects containing (x, y, psi, kappa, ub, lb)
         :param waypoint_coordinates: list of (x, y) coordinates of waypoints in
         global coordinates
+        :param kappa_interpolated: optional numpy array of CSV-derived curvature
+        values already interpolated to match waypoint_coordinates. When provided,
+        these are used directly instead of computing kappa via finite differences.
         :return: list of waypoint objects for entire reference path
         """
+
+        use_csv_kappa = (kappa_interpolated is not None
+                         and len(kappa_interpolated) >= len(waypoint_coordinates) - 1)
 
         # List containing waypoint objects
         waypoints = []
@@ -327,40 +369,46 @@ class ReferencePath:
             # Get x and y coordinates of current waypoint
             x, y = current_wp[0], current_wp[1]
 
-            # Compute local curvature at waypoint
-            if wp_id == 0:
-                if self.circular and len(waypoint_coordinates) > 2:
-                    prev_wp = np.array(waypoint_coordinates[-2])
+            # Use CSV curvature if available, otherwise fall back to finite differences
+            if use_csv_kappa:
+                kappa = float(kappa_interpolated[wp_id])
+            else:
+                # Compute local curvature at waypoint via finite differences (legacy)
+                if wp_id == 0:
+                    if self.circular and len(waypoint_coordinates) > 2:
+                        prev_wp = np.array(waypoint_coordinates[-2])
+                        dif_behind = current_wp - prev_wp
+                        angle_behind = np.arctan2(dif_behind[1], dif_behind[0])
+                        angle_dif = np.mod(psi - angle_behind + math.pi, 2 * math.pi) - math.pi
+                        kappa = angle_dif / (dist_ahead + self.eps)
+                    else:
+                        kappa = 0
+                else:
+                    prev_wp = np.array(waypoint_coordinates[wp_id - 1])
                     dif_behind = current_wp - prev_wp
                     angle_behind = np.arctan2(dif_behind[1], dif_behind[0])
-                    angle_dif = np.mod(psi - angle_behind + math.pi, 2 * math.pi) - math.pi
+                    angle_dif = np.mod(psi - angle_behind + math.pi, 2 * math.pi) \
+                                - math.pi
                     kappa = angle_dif / (dist_ahead + self.eps)
-                else:
-                    kappa = 0
-            else:
-                prev_wp = np.array(waypoint_coordinates[wp_id - 1])
-                dif_behind = current_wp - prev_wp
-                angle_behind = np.arctan2(dif_behind[1], dif_behind[0])
-                angle_dif = np.mod(psi - angle_behind + math.pi, 2 * math.pi) \
-                            - math.pi
-                kappa = angle_dif / (dist_ahead + self.eps)
 
             waypoints.append(Waypoint(x, y, psi, kappa))
 
-        # Smooth curvature (kappa) across waypoints to remove 20Hz discrete finite-difference noise
-        n_wps = len(waypoints)
-        if n_wps > 5:
-            raw_kappas = np.array([wp.kappa for wp in waypoints])
-            kernel = np.ones(5) / 5.0
-            smoothed_kappas = np.convolve(raw_kappas, kernel, mode='same')
-            # Boundary handling for convolve
-            smoothed_kappas[0] = raw_kappas[0]
-            smoothed_kappas[1] = (raw_kappas[0] + raw_kappas[1] + raw_kappas[2]) / 3.0
-            smoothed_kappas[-1] = raw_kappas[-1]
-            smoothed_kappas[-2] = (raw_kappas[-1] + raw_kappas[-2] + raw_kappas[-3]) / 3.0
+        # When using CSV kappa, no additional smoothing is needed (data is already C2-continuous).
+        # Only apply 5-point moving average when falling back to finite-difference computation.
+        if not use_csv_kappa:
+            n_wps = len(waypoints)
+            if n_wps > 5:
+                raw_kappas = np.array([wp.kappa for wp in waypoints])
+                kernel = np.ones(5) / 5.0
+                smoothed_kappas = np.convolve(raw_kappas, kernel, mode='same')
+                # Boundary handling for convolve
+                smoothed_kappas[0] = raw_kappas[0]
+                smoothed_kappas[1] = (raw_kappas[0] + raw_kappas[1] + raw_kappas[2]) / 3.0
+                smoothed_kappas[-1] = raw_kappas[-1]
+                smoothed_kappas[-2] = (raw_kappas[-1] + raw_kappas[-2] + raw_kappas[-3]) / 3.0
 
-            for i in range(n_wps):
-                waypoints[i].kappa = float(smoothed_kappas[i])
+                for i in range(n_wps):
+                    waypoints[i].kappa = float(smoothed_kappas[i])
 
         return waypoints
 
@@ -744,8 +792,9 @@ class ReferencePath:
                 # Transform upper and lower bound cells to world coordinates
                 ub_o = self.map.m2w(ub_o[0], ub_o[1])
                 lb_o = self.map.m2w(lb_o[0], lb_o[1])
-                # If segment larger than threshold, add to candidates
-                if ((ub_o[0]-lb_o[0])**2 + (ub_o[1]-lb_o[1])**2) > min_width**2:
+                # If segment larger than minimum clearance threshold (0.3m), add to candidates
+                min_clearance = 0.3
+                if ((ub_o[0]-lb_o[0])**2 + (ub_o[1]-lb_o[1])**2) > min_clearance**2:
                     free_segments.append((ub_o, lb_o))
                 # Start new segment
                 ub_o = (x, y)
@@ -885,30 +934,26 @@ class ReferencePath:
             segment_length_sm = segment_length - 2.0 * safety_margin
 
             # Check feasibility of the path
-            # segment_lengthから両側のsafety_marginを引いた値がmin_segment_lengthより小さい場合は、
-            # border_cellsで囲まれる領域の隙間が狭すぎて障害物回避が困難なため、
-            # 回避を諦めてwaypointのstaticなupper boundとlower boundを代わりに使用する
+            # segment_lengthから両側のsafety_marginを引いた値がmin_segment_lengthより小さい場合、
+            # 回避境界を全破棄するのではなく、障害物の反対側へ最小通過車幅を保証した領域を形成する
             if segment_length_sm < min_segment_length:
-                # print("Infeasible path detected!")
-                # print(f"Waypoint: {wp_id}, n: {n}, Upper bound: {ub}")
-                # print(f"min_width: {min_width}, safety_margin: {safety_margin}, segment_length: {segment_length}, segment_length_sm: {segment_length_sm}")
-                (ub, lb) = (wp.ub, wp.lb)
-                # print(f"Updated Upper bound: {wp.ub}, Updated Lower bound: {wp.lb}")
+                mid = (ub + lb) / 2.0
+                ub = mid + min_width / 2.0 + safety_margin
+                lb = mid - min_width / 2.0 - safety_margin
 
             # Subtract safety margin
             ub_sm = ub - safety_margin
             lb_sm = lb + safety_margin
 
-            if wp.ub_sm < ub_sm:
-              ub_sm = wp.ub_sm
-            if wp.lb_sm > lb_sm:
-              lb_sm = wp.lb_sm
+            # クリップはマップハード境界 (wp.ub, wp.lb) で行い、最適化ラインの偏りによる過度な回避スペース切断を回避
+            ub_sm = min(ub_sm, wp.ub - safety_margin)
+            lb_sm = max(lb_sm, wp.lb + safety_margin)
 
             # Check feasibility of the path after subtracting safety margin
             if ub_sm < lb_sm:
                 mid = (ub + lb) / 2.0
-                ub_sm = mid + 0.1
-                lb_sm = mid - 0.1
+                ub_sm = mid + 0.15
+                lb_sm = mid - 0.15
 
             # Compute absolute angle of bound cell
             angle_ub = np.mod(math.pi / 2 + wp.psi + math.pi,
@@ -1044,21 +1089,8 @@ class ReferencePath:
             # Set waypoint coordinates as bound cells if no feasible
             # segment available
             else:
-                print(f"No feasible free segment found! wp_id: {wp_id}, n: {n}")
-                ub_ls, lb_ls = (wp.x, wp.y), (wp.x, wp.y)
-
-                # left_angle = np.mod(wp.psi + math.pi / 2 + math.pi,
-                #                  2 * math.pi) - math.pi
-                # right_angle = np.mod(wp.psi - math.pi / 2 + math.pi,
-                #                    2 * math.pi) - math.pi
-
-                # ub_ls = (wp.x + min_width * np.cos(left_angle),
-                #          wp.y + min_width * np.sin(left_angle))
-                # lb_ls = (wp.x + min_width * np.cos(right_angle),
-                #          wp.y + min_width * np.sin(right_angle))
-
+                ub_ls, lb_ls = wp.static_border_cells[0], wp.static_border_cells[1]
                 add_constraint(wp, ub_ls, lb_ls)
-
                 n += 1  # increment waypoint index
 
         # return np.array(ub_hor), np.array(lb_hor), np.array(border_cells_hor_sm)
