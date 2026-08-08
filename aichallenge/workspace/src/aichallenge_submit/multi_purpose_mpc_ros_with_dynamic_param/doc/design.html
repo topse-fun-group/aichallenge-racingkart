@@ -323,20 +323,20 @@
         <pre class="mermaid">
 graph TD
     subgraph Sensing ["Sensors and Localization"]
-        Odom["/localization/kinematic_state<br/>nav_msgs/Odometry"]
-        V2X["/v2x/vehicle_positions<br/>v2x_msgs/V2XVehiclePositionArray"]
-        Scan["/sensing/lidar/scan<br/>sensor_msgs/LaserScan"]
+        Odom["/localization/kinematic_state&lt;br/&gt;nav_msgs/Odometry"]
+        V2X["/v2x/vehicle_positions&lt;br/&gt;v2x_msgs/V2XVehiclePositionArray"]
+        Scan["/sensing/lidar/scan&lt;br/&gt;sensor_msgs/LaserScan"]
     end
 
     subgraph Planning ["Planning and Environment"]
-        Traj["planning/scenario_planning/trajectory<br/>autoware_auto_planning_msgs/Trajectory"]
-        Constraints["/path_constraints_provider/path_constraints<br/>multi_purpose_mpc_ros_msgs/PathConstraints"]
+        Traj["planning/scenario_planning/trajectory&lt;br/&gt;autoware_auto_planning_msgs/Trajectory"]
+        Constraints["/path_constraints_provider/path_constraints&lt;br/&gt;multi_purpose_mpc_ros_msgs/PathConstraints"]
     end
 
     subgraph System ["System and Simulator"]
-        ControlMode["/control/control_mode_request_topic<br/>std_msgs/Bool"]
-        StopReq["/control/mpc/stop_request<br/>std_msgs/Empty"]
-        Condition["/aichallenge/pitstop/condition<br/>std_msgs/Int32"]
+        ControlMode["/control/control_mode_request_topic&lt;br/&gt;std_msgs/Bool"]
+        StopReq["/control/mpc/stop_request&lt;br/&gt;std_msgs/Empty"]
+        Condition["/aichallenge/pitstop/condition&lt;br/&gt;std_msgs/Int32"]
     end
 
     subgraph CoreNode ["mpc_controller node"]
@@ -345,26 +345,26 @@ graph TD
     end
 
     subgraph Output ["Control Commands and Visuals"]
-        Cmd["/control/command/control_cmd<br/>AckermannControlCommand"]
-        Gear["/control/command/gear_cmd<br/>GearCommand"]
-        StatePub["/mpc/driving_state<br/>std_msgs/String"]
-        PredPub["/mpc/prediction<br/>MarkerArray"]
+        Cmd["/control/command/control_cmd&lt;br/&gt;AckermannControlCommand"]
+        Gear["/control/command/gear_cmd&lt;br/&gt;GearCommand"]
+        StatePub["/mpc/driving_state&lt;br/&gt;std_msgs/String"]
+        PredPub["/mpc/prediction&lt;br/&gt;MarkerArray"]
     end
 
-    Odom --> StateMgr
-    V2X --> StateMgr
-    Scan --> StateMgr
-    Traj --> MPCSolver
-    Constraints --> MPCSolver
-    ControlMode --> StateMgr
-    StopReq --> StateMgr
-    Condition --> StateMgr
+    Odom --&gt; StateMgr
+    V2X --&gt; StateMgr
+    Scan --&gt; StateMgr
+    Traj --&gt; MPCSolver
+    Constraints --&gt; MPCSolver
+    ControlMode --&gt; StateMgr
+    StopReq --&gt; StateMgr
+    Condition --&gt; StateMgr
 
-    StateMgr --> MPCSolver
-    MPCSolver --> Cmd
-    MPCSolver --> Gear
-    StateMgr --> StatePub
-    MPCSolver --> PredPub
+    StateMgr --&gt; MPCSolver
+    MPCSolver --&gt; Cmd
+    MPCSolver --&gt; Gear
+    StateMgr --&gt; StatePub
+    MPCSolver --&gt; PredPub
         </pre>
       </div>
 
@@ -438,7 +438,6 @@ classDiagram
         -_build_state_context()
         -_apply_state_params()
     }
-
     class StateManager {
         -_states: Dict
         -_current: DrivingState
@@ -446,61 +445,52 @@ classDiagram
         +get_control_override(ctx)
         +current_state_name: string
     }
-
     class DrivingState {
+        &lt;&lt;interface&gt;&gt;
         +name: string
         +gear: int
         +get_params() MPCStateParams
         +check_transition(ctx) string
         +compute_control_override(ctx)
     }
-    <<interface>> DrivingState
-
     class FollowPathState {
         +V_MAX: 35.0
         +AY_MAX: 9.5
     }
-
     class FollowState {
         +TARGET_FOLLOWING_DISTANCE: 10.0
         +get_adjusted_v_max_kmh()
     }
-
     class OvertakeState {
         +MAX_OVERTAKE_DURATION: 2.5
     }
-
     class RecoveryState {
         +WAIT_DURATION: 2.0
         +BACK_SPEED: -2.5
     }
-
     class LidarProcessor {
         +get_forward_clearance()
         +get_overtake_widths()
     }
-
     class V2XVehicleTracker {
         +update()
         +velocity()
     }
-
     class MPC {
         +get_control()
         +update_v_max()
         +update_Q()
     }
-
-    Node <|-- MPCController
+    Node &lt;|-- MPCController
     MPCController *-- StateManager
     MPCController *-- LidarProcessor
     MPCController *-- V2XVehicleTracker
     MPCController *-- MPC
     StateManager *-- DrivingState
-    DrivingState <|-- FollowPathState
-    DrivingState <|-- FollowState
-    DrivingState <|-- OvertakeState
-    DrivingState <|-- RecoveryState
+    DrivingState &lt;|-- FollowPathState
+    DrivingState &lt;|-- FollowState
+    DrivingState &lt;|-- OvertakeState
+    DrivingState &lt;|-- RecoveryState
         </pre>
       </div>
     </div>
@@ -522,34 +512,34 @@ sequenceDiagram
     participant Solver as MPC (OSQP)
     participant Topics as ROS 2 Topics
 
-    Timer->>Main: _control()
-    Main->>Lidar: get_overtake_widths()
-    Lidar-->>Main: (left_w, right_w)
-    Main->>V2X: velocity() & active_vehicle_ids()
-    V2X-->>Main: (fwd_dist, fwd_speed)
+    Timer-&gt;&gt;Main: _control()
+    Main-&gt;&gt;Lidar: get_overtake_widths()
+    Lidar--&gt;&gt;Main: (left_w, right_w)
+    Main-&gt;&gt;V2X: velocity() &amp; active_vehicle_ids()
+    V2X--&gt;&gt;Main: (fwd_dist, fwd_speed)
     
-    Main->>Main: _build_state_context(dt, is_colliding) -> ctx
-    Main->>StateMgr: update(ctx)
+    Main-&gt;&gt;Main: _build_state_context(dt, is_colliding) -&gt; ctx
+    Main-&gt;&gt;StateMgr: update(ctx)
     
-    alt 状態遷移発生 (follow_path -> overtake)
-        StateMgr-->>Main: new_params (MPCStateParams)
-        Main->>Main: _apply_state_params(new_params)
+    alt 状態遷移発生 (follow_path -&gt; overtake)
+        StateMgr--&gt;&gt;Main: new_params (MPCStateParams)
+        Main-&gt;&gt;Main: _apply_state_params(new_params)
     else 状態変更なし
-        StateMgr-->>Main: None
+        StateMgr--&gt;&gt;Main: None
     end
 
     alt Recovery 状態 (Control Override)
-        Main->>StateMgr: get_control_override(ctx)
-        StateMgr-->>Main: (speed=-2.5, steer, accel)
-        Main->>Topics: publish /control/command/control_cmd & gear_cmd(REVERSE)
+        Main-&gt;&gt;StateMgr: get_control_override(ctx)
+        StateMgr--&gt;&gt;Main: (speed=-2.5, steer, accel)
+        Main-&gt;&gt;Topics: publish /control/command/control_cmd &amp; gear_cmd(REVERSE)
     else 通常走行状態
         opt Follow 状態
-            Main->>Main: 先行車距離に応じて dynamic_v_max 算出
+            Main-&gt;&gt;Main: 先行車距離に応じて dynamic_v_max 算出
         end
-        Main->>Main: 横オフセット smoothly interpolate
-        Main->>Solver: get_control()
-        Solver-->>Main: u = [v, delta], max_delta
-        Main->>Topics: publish /control/command/control_cmd & gear_cmd(DRIVE)
+        Main-&gt;&gt;Main: 横オフセット smoothly interpolate
+        Main-&gt;&gt;Solver: get_control()
+        Solver--&gt;&gt;Main: u = [v, delta], max_delta
+        Main-&gt;&gt;Topics: publish /control/command/control_cmd &amp; gear_cmd(DRIVE)
     end
         </pre>
       </div>
@@ -563,41 +553,25 @@ sequenceDiagram
       <div class="diagram-wrapper">
         <pre class="mermaid">
 stateDiagram-v2
-    [*] --> follow_path : "初期起動 (35 km/h)"
+    [*] --&gt; follow_path
 
-    state follow_path {
-        [*] --> PathFollowing
-        PathFollowing : レーシングライン最速追従
-    }
+    follow_path : follow_path / レーシングライン最速追従 (35 km/h)
+    follow : follow / 先行車追従 (10m キープ)
+    overtake : overtake / 動的横オフセット通過 (最大 2.5s)
+    recovery_wait : recovery [wait] / 完全停止 2.0s
+    recovery_back : recovery [back] / REVERSE 後退 + P制御ステア
 
-    state follow {
-        [*] --> VehicleFollowing
-        VehicleFollowing : 先行車追従 (10mキープ)
-    }
+    follow_path --&gt; follow : 前方15m以内に車両 かつ 空き幅 2.3m以下
+    follow_path --&gt; overtake : 前方15m以内に車両 かつ 空き幅 2.3m超
+    follow --&gt; overtake : 空き幅 2.3m超を検知
+    follow --&gt; follow_path : 前方車両が消失 (距離 15m以上)
+    overtake --&gt; follow_path : 通過完了 または 2.5s タイムアウト
 
-    state overtake {
-        [*] --> LaneShifting
-        LaneShifting : 動的横オフセット通過 (2.5s)
-    }
-
-    state recovery {
-        [*] --> WaitPhase : 2.0s 完全停止
-        WaitPhase --> BackPhase : 停止完了
-        BackPhase : 後退およびP制御ステア
-    }
-
-    follow_path --> follow : "前方15m以内に車両 ＆ 幅 2.3m以下"
-    follow_path --> overtake : "前方15m以内に車両 ＆ 幅 2.3m超"
-    follow_path --> recovery : "衝突検知 または スタック (速度0.3m/s未満が8s継続)"
-
-    follow --> overtake : "幅 2.3m超を検知"
-    follow --> follow_path : "前方車両消脱 (距離 15m以上)"
-    follow --> recovery : "衝突検知 または スタック"
-
-    overtake --> follow_path : "通過完了 または 2.5sタイムアウト"
-    overtake --> recovery : "衝突検知 または スタック"
-
-    recovery --> follow_path : "パス偏差 2.0m未満 または 後退3.5s経過"
+    follow_path --&gt; recovery_wait : 衝突検知 / スタック
+    follow --&gt; recovery_wait : 衝突検知 / スタック
+    overtake --&gt; recovery_wait : 衝突検知 / スタック
+    recovery_wait --&gt; recovery_back : 停止完了 (2.0s 経過)
+    recovery_back --&gt; follow_path : パス偏差 2.0m未満 または 後退 3.5s 経過
         </pre>
       </div>
 
@@ -757,29 +731,52 @@ stateDiagram-v2
   </div>
 
   <script>
+    /* ---- Mermaid: render lazily, only when the tab is actually visible ---- */
+    mermaid.initialize({
+      startOnLoad: false,          // do NOT render hidden tabs on load
+      theme: 'dark',
+      securityLevel: 'loose',
+      flowchart: { htmlLabels: true, useMaxWidth: true },
+      class:     { useMaxWidth: true },
+      sequence:  { useMaxWidth: true },
+      state:     { useMaxWidth: true }
+    });
+
+    function renderDiagrams(container) {
+      if (!window.mermaid || !container) return;
+      var nodes = Array.prototype.slice.call(
+        container.querySelectorAll('.mermaid:not([data-processed])')
+      );
+      if (!nodes.length) return;
+      // wait one frame so the container has real layout dimensions
+      requestAnimationFrame(function () {
+        mermaid.run({ nodes: nodes }).catch(function (err) {
+          console.error('Mermaid render error:', err);
+        });
+      });
+    }
+
     function showTab(tabId) {
-      document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
-      document.querySelectorAll('.section-card').forEach(card => card.classList.remove('active'));
-      
-      const targetBtn = Array.from(document.querySelectorAll('.tab-btn')).find(btn => btn.getAttribute('onclick').includes(tabId));
+      document.querySelectorAll('.tab-btn').forEach(function (btn) { btn.classList.remove('active'); });
+      document.querySelectorAll('.section-card').forEach(function (card) { card.classList.remove('active'); });
+
+      var targetBtn = Array.prototype.slice.call(document.querySelectorAll('.tab-btn'))
+        .find(function (btn) {
+          var oc = btn.getAttribute('onclick');
+          return oc && oc.indexOf(tabId) !== -1;
+        });
       if (targetBtn) targetBtn.classList.add('active');
 
-      const targetCard = document.getElementById(tabId);
+      var targetCard = document.getElementById(tabId);
       if (targetCard) {
         targetCard.classList.add('active');
-        if (window.mermaid) {
-          mermaid.run({
-            nodes: targetCard.querySelectorAll('.mermaid')
-          }).catch(err => console.log('Mermaid run error:', err));
-        }
+        renderDiagrams(targetCard);
       }
     }
 
-    // Initialize Mermaid
-    mermaid.initialize({
-      startOnLoad: true,
-      theme: 'dark',
-      securityLevel: 'loose'
+    document.addEventListener('DOMContentLoaded', function () {
+      var active = document.querySelector('.section-card.active');
+      if (active) renderDiagrams(active);
     });
   </script>
 </body>
