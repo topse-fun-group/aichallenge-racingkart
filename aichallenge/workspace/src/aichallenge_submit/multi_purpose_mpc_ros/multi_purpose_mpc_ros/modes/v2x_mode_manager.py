@@ -92,6 +92,7 @@ class V2XModeManager:
         is_leading_ahead = False
         min_rel_fwd = 0.0
         min_rel_lat = 0.0
+        min_lead_rel_fwd = 0.0
 
         fwd_cos = math.cos(ego_yaw)
         fwd_sin = math.sin(ego_yaw)
@@ -137,6 +138,7 @@ class V2XModeManager:
 
                 if is_ahead and d < min_d:
                     min_d = d
+                    min_lead_rel_fwd = dot
                     is_leading_ahead = True
                     lead_speed = math.hypot(vx, vy)
                     ego_vx = ego_speed_mps * fwd_cos
@@ -155,7 +157,8 @@ class V2XModeManager:
         # OVERTAKING Lock check
         if self.overtake_lock_until is not None:
             if now_sec < self.overtake_lock_until:
-                if not is_leading_ahead and (0.5 <= min_d < float('inf')) and min_d >= overtake_clearance:
+                is_passed = (is_leading_ahead and min_lead_rel_fwd < -2.0)
+                if not is_leading_ahead or is_passed or min_d >= follow_start:
                     self.mode = "NORMAL"
                     self.vehicle_radius = vehicle_radius_normal
                     self.speed_limit = float('inf')
@@ -166,7 +169,7 @@ class V2XModeManager:
                 else:
                     self.mode = "OVERTAKING"
                     self.vehicle_radius = self.stuck_target_radius
-                    self.speed_limit = float('inf')
+                    self.speed_limit = min(v_max_normal, max(kmh_to_m_per_sec(15.0), lead_speed + kmh_to_m_per_sec(10.0)))
                 return V2XStateOutput(self.mode, self.speed_limit, self.vehicle_radius)
             else:
                 self.overtake_lock_until = None
@@ -188,27 +191,33 @@ class V2XModeManager:
         # Mode Transition Logic
         if self.mode == "OVERTAKING":
             self.emergency_brake_since = None
-            # 静止・極低速他車へのアプローチ中（d < 8.0mかつ lead_speed < 2.0m/s）：
-            # 急な最高速突入による衝突を防ぎ、MPC 回避操舵の時間的余裕を確保するため速度を段階制限（10.0〜15.0 km/h）
-            if is_leading_ahead and lead_speed < 2.0 and min_d < 8.0:
-                safe_approach_v = max(kmh_to_m_per_sec(10.0), lead_speed + kmh_to_m_per_sec(6.0))
-                self.speed_limit = min(v_max_normal, safe_approach_v)
+            self.vehicle_radius = vehicle_radius_overtake
+
+            # 先行車が自車前方に存在中（rel_fwd > 0.0）は過剰高速（45km/h）突入を防ぎ、コントロールされた速度（lead + 10km/h）に抑える
+            if is_leading_ahead and min_lead_rel_fwd > 0.0:
+                controlled_v = max(kmh_to_m_per_sec(15.0), lead_speed + kmh_to_m_per_sec(10.0))
+                self.speed_limit = min(v_max_normal, controlled_v)
             else:
                 self.speed_limit = float('inf')
 
-            # 追い越し完了条件（前方車両をクリア、または障害物エリア脱出）
-            if not is_leading_ahead or min_d >= overtake_clearance:
+            # 追い越し完了条件：
+            # 1. 自車が先行車の前方へ抜け出た場合 (min_lead_rel_fwd < -2.0m)
+            # 2. 前方に車が存在しない、または遠方 (min_d >= 15.0m) へ離脱した場合
+            is_passed = (is_leading_ahead and min_lead_rel_fwd < -2.0)
+            is_far_away = (not is_leading_ahead or min_d >= follow_start)
+
+            if is_passed or is_far_away:
                 self.mode = "NORMAL"
                 self.vehicle_radius = vehicle_radius_normal
                 self.speed_limit = float('inf')
                 self.following_since = None
-                self._log('info', f"[V2X] Overtaking COMPLETE! d={min_d:.1f}m. Back to NORMAL.")
+                self._log('info', f"[V2X] Overtaking COMPLETE! (passed={is_passed}, d={min_d:.1f}m). Back to NORMAL.")
 
         elif (is_stationary_lead or should_direct_overtake) and self.mode in ("NORMAL", "FOLLOWING", "EMERGENCY_BRAKE"):
             self.mode = "OVERTAKING"
             self.vehicle_radius = vehicle_radius_overtake
-            safe_approach_v = max(kmh_to_m_per_sec(10.0), lead_speed + kmh_to_m_per_sec(6.0)) if min_d < 8.0 else float('inf')
-            self.speed_limit = min(v_max_normal, safe_approach_v)
+            controlled_v = max(kmh_to_m_per_sec(15.0), lead_speed + kmh_to_m_per_sec(10.0))
+            self.speed_limit = min(v_max_normal, controlled_v)
             self.emergency_brake_since = None
             self._log('info',
                 f"[V2X] Instant Direct OVERTAKING (Stationary/Stuck Lead Avoidance): d={min_d:.1f}m lead_v={lead_speed*3.6:.1f}km/h rad={self.vehicle_radius:.2f}m",
@@ -238,8 +247,8 @@ class V2XModeManager:
             if is_stationary_lead or eb_duration >= overtake_patience:
                 self.mode = "OVERTAKING"
                 self.vehicle_radius = vehicle_radius_overtake
-                safe_approach_v = max(kmh_to_m_per_sec(10.0), lead_speed + kmh_to_m_per_sec(6.0)) if min_d < 8.0 else float('inf')
-                self.speed_limit = min(v_max_normal, safe_approach_v)
+                controlled_v = max(kmh_to_m_per_sec(15.0), lead_speed + kmh_to_m_per_sec(10.0))
+                self.speed_limit = min(v_max_normal, controlled_v)
                 self.emergency_brake_since = None
                 self._log('info',
                     f"[V2X] EMERGENCY_BRAKE -> OVERTAKING (Immediate Stationary bypass): dur={eb_duration:.1f}s d={min_d:.1f}m rad={self.vehicle_radius:.2f}m")
@@ -253,9 +262,9 @@ class V2XModeManager:
             self.following_since = now_sec
             self.emergency_brake_since = None
             target_follow_speed = max(lead_speed, v_min_safe_mps)
-            ratio = max(0.0, (min_d - follow_brake) / denom_follow)
-            acc_speed = target_follow_speed + ratio * (v_max_normal - target_follow_speed)
-            self.speed_limit = min(v_max_normal, acc_speed)
+            ratio = max(0.0, min(1.0, (min_d - follow_brake) / denom_follow))
+            max_allowable_speed = target_follow_speed + ratio * kmh_to_m_per_sec(12.0)
+            self.speed_limit = min(v_max_normal, max_allowable_speed)
             self._log('info',
                 f"[V2X] FOLLOWING (ACC): d={min_d:.1f}m lead_v={lead_speed*3.6:.1f}km/h v_lim={self.speed_limit*3.6:.1f}km/h",
                 throttle_duration_sec=1.0)
@@ -269,16 +278,16 @@ class V2XModeManager:
                 self._log('info', "[V2X] Back to NORMAL (vehicle left front zone)")
             else:
                 target_follow_speed = max(lead_speed, v_min_safe_mps)
-                ratio = max(0.0, (min_d - follow_brake) / denom_follow)
-                acc_speed = target_follow_speed + ratio * (v_max_normal - target_follow_speed)
-                self.speed_limit = min(v_max_normal, acc_speed)
+                ratio = max(0.0, min(1.0, (min_d - follow_brake) / denom_follow))
+                max_allowable_speed = target_follow_speed + ratio * kmh_to_m_per_sec(12.0)
+                self.speed_limit = min(v_max_normal, max_allowable_speed)
 
                 following_duration = now_sec - (self.following_since or now_sec)
                 if (following_duration >= overtake_patience and min_d <= overtake_gap_min):
                     self.mode = "OVERTAKING"
                     self.vehicle_radius = vehicle_radius_overtake
-                    safe_approach_v = max(kmh_to_m_per_sec(10.0), lead_speed + kmh_to_m_per_sec(6.0)) if min_d < 8.0 else float('inf')
-                    self.speed_limit = min(v_max_normal, safe_approach_v)
+                    controlled_v = max(kmh_to_m_per_sec(15.0), lead_speed + kmh_to_m_per_sec(10.0))
+                    self.speed_limit = min(v_max_normal, controlled_v)
                     self._log('info', f"[V2X] OVERTAKING: following={following_duration:.1f}s d={min_d:.1f}m")
 
         else:

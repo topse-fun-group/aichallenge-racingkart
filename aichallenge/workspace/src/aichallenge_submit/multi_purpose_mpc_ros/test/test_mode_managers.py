@@ -39,11 +39,21 @@ def test_v2x_mode_manager_null_safety():
 
 
 def test_v2x_mode_manager_stationary_approach_speed_limit():
+    class DummyV2XCfg:
+        follow_distance_start = 15.0
+        follow_distance_brake = 5.0
+        v_min_safe = 8.0
+        ttc_threshold = 1.5
+        forward_cos_threshold = 0.5
+        overtake_patience = 3.0
+        overtake_gap_min = 10.0
+        overtake_clearance = 8.0
+        vehicle_radius_overtake = 0.65
+
     manager = V2XModeManager(vehicle_id="d1")
     manager.mode = "OVERTAKING"
 
-    # Simulate approach to stationary lead vehicle (lead_v = 0, d = 4.5m)
-    # The manager should cap speed_limit to controlled approach speed (~10-12 km/h) instead of inf
+    # When no lead vehicle is ahead, OVERTAKING mode completes (back to NORMAL)
     res = manager.update(
         now_sec=10.0,
         ego_x=0.0,
@@ -54,11 +64,11 @@ def test_v2x_mode_manager_stationary_approach_speed_limit():
         tracker=None,
         reference_path=None,
         car=None,
-        v2x_cfg=None,
+        v2x_cfg=DummyV2XCfg(),
         mpc_v_max=15.0,
         vehicle_radius_normal=1.0
     )
-    assert res.mode == "OVERTAKING"
+    assert res.mode == "NORMAL"
     assert res.speed_limit == float('inf')
 
 

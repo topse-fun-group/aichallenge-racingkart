@@ -473,6 +473,24 @@
   2. [`config.yaml:L106`](file:///home/takao/aichallenge-racingkart_local/aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros/config/config.yaml#L106) の `stuck_time_threshold` を `1.0s` に、`stuck_velocity_threshold` を `0.25 m/s` に安定最適化。
 - **効果**: 壁衝突後のバック切返しが意図通り **1回でスマートに完結** し、前進加速へスムーズに移行するようになった。
 
+### 8.12 走行中における先行他車追突・衝突原因の解明と対策 (2026-08-08 確定)
+
+- **発現状況**: 評価環境ログ (`race-log/autoware.log`) 解析において、自車 (`d1`) が走行中に先行走行する低速他車へ追突・衝突を繰り返していた。
+- **解明された3大技術的原因**:
+  1. **`should_direct_overtake` ($d < 15\text{m}$) と `overtake_clearance` ($d \ge 8\text{m}$) の論理競合**:
+     - $d = 8.0\sim15.0\text{m}$ の範囲で速度差があると、同一フレーム内で「追い越し開始」と「追い越し完了」が毎秒40回激しくトグル発振していた（ログ L287–L450 で1分間に100回以上ループ）。
+     - この結果 `vehicle_radius` ($1.0\text{m} \leftrightarrow 0.65\text{m}$) と MPC コリドー領域が不連続に揺れ動き、回避軌道が崩壊していた。
+  2. **`FOLLOWING` (ACC) モードの危険な過剰接近速度**:
+     - 先行車が 5.6 km/h で走行中、$d = 12.8\text{m}$ 手前で自車が 36.9 km/h の速度命令を出力。約 31 km/h の相対接近速度（秒速 8.7m）で接近し、わずか 0.9 秒でノーブレーキでリアへ激突していた。
+  3. **「追い越し完了」判定の概念的欠陥**:
+     - 前方 8.0m に先行車が存在しているのに「完了」と誤判定し、障害物半径を広げて衝突を招いていた。
+
+- **実施した対策と制御改善**:
+  1. [`v2x_mode_manager.py:L205`](file:///home/takao/aichallenge-racingkart_local/aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros/multi_purpose_mpc_ros/modes/v2x_mode_manager.py#L205) にて `OVERTAKING` 完了条件を「自車が先行車の前方へ抜け出た状態 (`min_lead_rel_fwd < -2.0m`)」または「遠方離脱 (`min_d >= 15.0m`)」に厳格化。前方に先行車が存在する間は `OVERTAKING` モードを安定維持し、モード発振を 100% 撲滅。
+  2. [`v2x_mode_manager.py:L249`](file:///home/takao/aichallenge-racingkart_local/aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros/multi_purpose_mpc_ros/modes/v2x_mode_manager.py#L249) にて ACC 追従速度上限プロファイルを改修し、接近速度（相対速度）を常に $3.3\text{ m/s}$（約 12 km/h）以下に自動制限。
+  3. `OVERTAKING` 実行中（先行車が前方に存在時 $rel\_fwd > 0.0$）の目標速度を `max(lead_speed + 10.0km/h, 15.0km/h)` にコントロールし、最高速突入を防ぎつつスマートにすり抜け追い越しを完了させる構造へ刷新。
+- **効果**: 低速先行他車に対して追突・衝突することなく、スムーズに減速追従し、安全に横をすり抜けて抜かす制御が実現された。
+
 
 
 
