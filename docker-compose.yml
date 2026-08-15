@@ -31,7 +31,7 @@ x-autoware-base: &autoware-base
     - ./docker-entrypoint.sh:/docker-entrypoint.sh
     - ./vehicle/cyclonedds.xml:/opt/autoware/cyclonedds.xml
     - /tmp/.X11-unix:/tmp/.X11-unix:rw
-    #- /dev/dri:/dev/dri
+    - /dev/dri:/dev/dri
     - ${XAUTHORITY:-/dev/null}:${XAUTHORITY:-/dev/null}:rw
     - /etc/passwd:/etc/passwd:ro
     - /etc/group:/etc/group:ro
@@ -58,7 +58,7 @@ x-autoware-rosbag-base: &autoware-rosbag-base
     - /etc/group:/etc/group:ro
     - /tmp/.X11-unix:/tmp/.X11-unix:rw
     # No audio mount: rosbag recording needs no PulseAudio.
-    #- /dev/dri:/dev/dri
+    - /dev/dri:/dev/dri
     - ${XAUTHORITY:-/dev/null}:${XAUTHORITY:-/dev/null}:rw
 
 x-racing_kart_interface-base: &racing_kart_interface-base
@@ -87,7 +87,7 @@ x-racing_kart_interface-base: &racing_kart_interface-base
     - /dev/vcu:/dev/vcu
     - /dev/gnss:/dev/gnss
     - /tmp/.X11-unix:/tmp/.X11-unix:rw
-    #- /dev/dri:/dev/dri
+    - /dev/dri:/dev/dri
     - /etc/passwd:/etc/passwd:ro
     - /etc/group:/etc/group:ro
   devices:
@@ -127,7 +127,7 @@ services:
       - ./output:${OUTPUT_ROOT:-/output}
       - ./vehicle/cyclonedds.xml:/opt/autoware/cyclonedds.xml
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
-      #- /dev/dri:/dev/dri
+      - /dev/dri:/dev/dri
       - ${XAUTHORITY:-/dev/null}:${XAUTHORITY:-/dev/null}:rw
       - /etc/passwd:/etc/passwd:ro
       - /etc/group:/etc/group:ro
