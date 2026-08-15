@@ -51,16 +51,16 @@ mpc:
   # steer_low_pass_gain: 0.3
   accel_low_pass_gain: 1.0
   steer_low_pass_gain: 1.0   # Direct continuous 40 Hz steering output (eliminating multi-stage staircase lag)
-  wp_id_offset: 3            # Target offset tuned for smooth S-curve transition
-  use_max_kappa_pred: true   # Enable curvature-based smoothing
+  wp_id_offset: 2            # Immediate target offset (1.2m - tight curve curvature tracking)
+  use_max_kappa_pred: false
   delay_compensation_sec: 0.05             # [s] Mild control latency compensation
   enable_dynamic_delay_compensation: true  # Dynamic delay compensation flag based on velocity
 
   ## --- 高速最適安定周回 (OSQPソルバ完全実現可能性・衝突ゼロ) --- ##
   v_max: 45.0
-  ay_max: 13.5  # Optimized lateral acceleration limit for faster corner entry
-  Q: [400.0, 800.0, 100.0]   # Balanced lateral/heading ratio for smooth S-curve steering
-  QN: [400.0, 800.0, 100.0]
+  ay_max: 13.0
+  Q: [200.0, 1500.0, 100.0]
+  QN: [200.0, 1500.0, 100.0]
 
   ## -------- 低速 -------------- ##
   ## Lap1: 86s
