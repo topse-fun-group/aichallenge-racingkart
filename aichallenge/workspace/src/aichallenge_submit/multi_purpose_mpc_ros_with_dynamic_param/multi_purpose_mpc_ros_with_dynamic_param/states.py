@@ -10,10 +10,18 @@ Phase 1: FollowPath + Recovery
 Phase 2: Follow + Overtake
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from typing import Optional, List, Tuple
 import numpy as np
+
+class ControlMode(Enum):
+    PURE_PURSUIT = auto()
+    MPC = auto()
+    OVERRIDE = auto()
 
 try:
     from autoware_auto_vehicle_msgs.msg import GearCommand
@@ -71,14 +79,26 @@ class StateContext:
     # --- V2X (Phase 2) ------------------------------------------------------
     forward_vehicle_distance: Optional[float] = None   # [m]
     forward_vehicle_speed: Optional[float] = None       # [m/s]
+    forward_vehicle_heading_diff: float = 0.0          # absolute heading diff relative to path_psi [rad]
 
     # --- LiDAR (Phase 2) ----------------------------------------------------
     overtake_width_left: float = 0.0   # available width on left [m]
     overtake_width_right: float = 0.0  # available width on right [m]
+    lidar_forward_clearance: Optional[float] = None   # [m] from LiDAR forward cone
 
     # --- Stuck detection ----------------------------------------------------
     time_stopped_sec: float = 0.0  # duration velocity ≈ 0 [s]
     is_in_recovery_cooldown: bool = False  # True during cooldown after recovery / startup
+
+
+def _get_effective_forward_distance(ctx: StateContext) -> Optional[float]:
+    """Get the minimum forward distance from V2X or LiDAR."""
+    dists = []
+    if ctx.forward_vehicle_distance is not None:
+        dists.append(ctx.forward_vehicle_distance)
+    if ctx.lidar_forward_clearance is not None:
+        dists.append(ctx.lidar_forward_clearance)
+    return min(dists) if dists else None
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +118,11 @@ class DrivingState(ABC):
     def gear(self) -> int:
         """Gear command for this state (GEAR_DRIVE or GEAR_REVERSE)."""
         return GEAR_DRIVE
+
+    @property
+    def control_mode(self) -> ControlMode:
+        """Control mode required by this state (PURE_PURSUIT, MPC, or OVERRIDE)."""
+        return ControlMode.MPC
 
     @abstractmethod
     def get_params(self) -> MPCStateParams:
@@ -155,6 +180,10 @@ class FollowPathState(DrivingState):
     def name(self) -> str:
         return "follow_path"
 
+    @property
+    def control_mode(self) -> ControlMode:
+        return ControlMode.PURE_PURSUIT
+
     def get_params(self) -> MPCStateParams:
         return MPCStateParams(
             v_max=self.V_MAX,
@@ -175,14 +204,20 @@ class FollowPathState(DrivingState):
                 and ctx.velocity < STUCK_VELOCITY_THRESHOLD):
             return "recovery"
 
-        # Phase 2: forward-vehicle detection
-        if ctx.forward_vehicle_distance is not None:
-            if ctx.forward_vehicle_distance < self.VEHICLE_DETECT_DISTANCE:
-                max_side = max(ctx.overtake_width_left, ctx.overtake_width_right)
-                if max_side > self.VEHICLE_WIDTH_WITH_MARGIN:
-                    return "overtake"
-                else:
-                    return "follow"
+        # Phase 2: forward-vehicle / obstacle detection (V2X + LiDAR fusion)
+        eff_dist = _get_effective_forward_distance(ctx)
+        if eff_dist is not None and eff_dist < self.VEHICLE_DETECT_DISTANCE:
+            max_side = max(ctx.overtake_width_left, ctx.overtake_width_right)
+            has_clearance = max_side > self.VEHICLE_WIDTH_WITH_MARGIN
+            is_zero_speed = (ctx.forward_vehicle_speed is not None and ctx.forward_vehicle_speed < 0.3)
+            is_aligned = (ctx.forward_vehicle_heading_diff <= np.deg2rad(45.0))
+
+            # (1) Overtake if clearance exists AND (leader is stopped OR leader heading is NOT aligned with path)
+            # (2) Follow if no clearance OR leader is aligned and moving
+            if has_clearance and (is_zero_speed or not is_aligned):
+                return "overtake"
+            else:
+                return "follow"
 
         return None
 
@@ -212,6 +247,10 @@ class RecoveryState(DrivingState):
     @property
     def name(self) -> str:
         return "recovery"
+
+    @property
+    def control_mode(self) -> ControlMode:
+        return ControlMode.OVERRIDE
 
     @property
     def gear(self) -> int:
@@ -331,22 +370,29 @@ class FollowState(DrivingState):
         if ctx.is_colliding:
             return "recovery"
 
-        # Stuck detection
-        if (not ctx.is_in_recovery_cooldown
-                and ctx.time_stopped_sec >= STUCK_DURATION
-                and ctx.velocity < STUCK_VELOCITY_THRESHOLD):
-            return "recovery"
+        eff_dist = _get_effective_forward_distance(ctx)
 
-        # No forward vehicle any more → back to follow_path
-        if ctx.forward_vehicle_distance is None:
-            return "follow_path"
-        if ctx.forward_vehicle_distance >= self.VEHICLE_DETECT_DISTANCE:
+        # No forward vehicle/obstacle anymore → back to follow_path
+        if eff_dist is None or eff_dist >= self.VEHICLE_DETECT_DISTANCE:
             return "follow_path"
 
-        # Overtake became possible
         max_side = max(ctx.overtake_width_left, ctx.overtake_width_right)
-        if max_side > self.VEHICLE_WIDTH_WITH_MARGIN:
+        has_clearance = max_side > self.VEHICLE_WIDTH_WITH_MARGIN
+        is_zero_speed = (ctx.forward_vehicle_speed is not None and ctx.forward_vehicle_speed < 0.3)
+        is_aligned = (ctx.forward_vehicle_heading_diff <= np.deg2rad(45.0))
+
+        # Switch to Overtake if clearance exists AND (leader is stopped OR leader heading is NOT aligned)
+        if has_clearance and (is_zero_speed or not is_aligned):
             return "overtake"
+
+        # Stuck detection: ONLY trigger Recovery if NOT intentionally waiting behind a leader/obstacle
+        # If we are waiting behind a stopped leader without clearance, suppress Recovery false-alarm
+        is_waiting_behind_leader = (eff_dist < 12.0 and not has_clearance)
+        if not is_waiting_behind_leader:
+            if (not ctx.is_in_recovery_cooldown
+                    and ctx.time_stopped_sec >= STUCK_DURATION
+                    and ctx.velocity < STUCK_VELOCITY_THRESHOLD):
+                return "recovery"
 
         return None
 
@@ -354,14 +400,17 @@ class FollowState(DrivingState):
 
     def get_adjusted_v_max_kmh(self, ctx: StateContext) -> float:
         """Compute dynamic v_max [km/h] to maintain following distance (10m)."""
-        if ctx.forward_vehicle_distance is None or ctx.forward_vehicle_speed is None:
+        eff_dist = _get_effective_forward_distance(ctx)
+        if eff_dist is None:
             return self._V_MAX_DEFAULT
 
-        distance_error = ctx.forward_vehicle_distance - self.TARGET_FOLLOWING_DISTANCE
-        target_mps = ctx.forward_vehicle_speed + self.FOLLOWING_KP * distance_error
+        fwd_speed = ctx.forward_vehicle_speed if ctx.forward_vehicle_speed is not None else 0.0
+        distance_error = eff_dist - self.TARGET_FOLLOWING_DISTANCE
+        target_mps = fwd_speed + self.FOLLOWING_KP * distance_error
         target_kmh = target_mps * 3.6
-        # 最低速度を下限 20.0 km/h に設定し、極端な徐行・停滞を防止
-        return float(np.clip(target_kmh, 20.0, self._V_MAX_DEFAULT))
+
+        # Allow full stop (0 km/h min) when behind a stopped or close leader to maintain safe distance
+        return float(np.clip(target_kmh, 0.0, self._V_MAX_DEFAULT))
 
 
 class OvertakeState(DrivingState):
