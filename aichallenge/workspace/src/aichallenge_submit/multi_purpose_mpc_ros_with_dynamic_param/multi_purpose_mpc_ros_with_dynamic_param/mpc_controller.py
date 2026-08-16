@@ -890,14 +890,18 @@ class MPCController(Node):
         return float(np.sqrt(np.min(dists_sq)))
 
     def _detect_forward_vehicle(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-        """Return (distance, speed, heading_rad) of the nearest V2X vehicle in the forward cone."""
-        HALF_ANGLE = np.deg2rad(45.0)
-        MAX_DIST = 15.0
+        """Return (distance, speed, heading_rad) of the nearest V2X vehicle directly in front in the same lane."""
+        HALF_ANGLE = np.deg2rad(20.0)      # Narrow to ±20 deg forward cone
+        MAX_DIST = 10.0                    # 10m max forward detection distance
+        MAX_LATERAL_DIFF = 2.0             # Lateral tolerance [m] to eliminate adjacent lanes / opposite track
 
         pose = odom_to_pose_2d(self._odom)  # type: ignore
         best_dist: Optional[float] = None
         best_speed: Optional[float] = None
         best_heading: Optional[float] = None
+
+        cos_t = np.cos(pose.theta)
+        sin_t = np.sin(pose.theta)
 
         for vid in self._v2x_tracker.active_vehicle_ids():
             buf = self._v2x_tracker._samples.get(vid)
@@ -906,13 +910,25 @@ class MPCController(Node):
             _, vx_pos, vy_pos = buf[-1]
             dx = vx_pos - pose.x
             dy = vy_pos - pose.y
-            dist = np.hypot(dx, dy)
-            if dist > MAX_DIST:
+
+            # Transform to ego-vehicle local coordinates
+            x_rel = cos_t * dx + sin_t * dy
+            y_rel = -sin_t * dx + cos_t * dy
+
+            # Must be ahead in longitudinal direction
+            if x_rel < 0.5 or x_rel > MAX_DIST:
                 continue
+
+            # Must be in the same lane laterally
+            if abs(y_rel) > MAX_LATERAL_DIFF:
+                continue
+
             angle = np.arctan2(dy, dx) - pose.theta
             angle = (angle + np.pi) % (2 * np.pi) - np.pi
             if abs(angle) > HALF_ANGLE:
                 continue
+
+            dist = float(np.hypot(dx, dy))
             if best_dist is None or dist < best_dist:
                 best_dist = dist
                 vx_vel, vy_vel = self._v2x_tracker.velocity(vid)

@@ -92,13 +92,8 @@ class StateContext:
 
 
 def _get_effective_forward_distance(ctx: StateContext) -> Optional[float]:
-    """Get the minimum forward distance from V2X or LiDAR."""
-    dists = []
-    if ctx.forward_vehicle_distance is not None:
-        dists.append(ctx.forward_vehicle_distance)
-    if ctx.lidar_forward_clearance is not None:
-        dists.append(ctx.lidar_forward_clearance)
-    return min(dists) if dists else None
+    """Get the effective forward vehicle distance from V2X tracker."""
+    return ctx.forward_vehicle_distance
 
 
 # ---------------------------------------------------------------------------
