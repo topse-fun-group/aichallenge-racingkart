@@ -46,6 +46,24 @@ class LidarProcessor:
     def has_scan(self) -> bool:
         return self._scan is not None
 
+    def get_range_clearance(self) -> Optional[float]:
+        """Minimum range in the circle.
+
+        Returns ``None`` when no scan is available or no valid ranges
+        exist in the cone.
+        """
+        if self._scan is None:
+            return None
+
+        scan = self._scan
+
+        ranges = np.array(scan.ranges, dtype=np.float64)
+        n = len(ranges)
+        if n == 0:
+            return None
+
+        return float(np.min(ranges))
+
     def get_forward_clearance(
         self, half_angle_deg: float = 30.0
     ) -> Optional[float]:

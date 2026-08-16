@@ -85,6 +85,7 @@ class StateContext:
     overtake_width_left: float = 0.0   # available width on left [m]
     overtake_width_right: float = 0.0  # available width on right [m]
     lidar_forward_clearance: Optional[float] = None   # [m] from LiDAR forward cone
+    lidar_range_clearance: Optional[float] = None     # [m] from LiDAR full range
 
     # --- Stuck detection ----------------------------------------------------
     time_stopped_sec: float = 0.0  # duration velocity ≈ 0 [s]
@@ -92,8 +93,14 @@ class StateContext:
 
 
 def _get_effective_forward_distance(ctx: StateContext) -> Optional[float]:
-    """Get the effective forward vehicle distance from V2X tracker."""
-    return ctx.forward_vehicle_distance
+    """Get the effective forward distance combining V2X and close-proximity LiDAR (<= 5.0m)."""
+    dists = []
+    if ctx.forward_vehicle_distance is not None:
+        dists.append(ctx.forward_vehicle_distance)
+    # Gated LiDAR: Consider LiDAR if obstacle is within 5.0m radius to guarantee collision prevention
+    if ctx.lidar_forward_clearance is not None and ctx.lidar_forward_clearance <= 5.0:
+        dists.append(ctx.lidar_forward_clearance)
+    return min(dists) if dists else None
 
 
 # ---------------------------------------------------------------------------
@@ -333,20 +340,29 @@ class RecoveryState(DrivingState):
 # ---------------------------------------------------------------------------
 
 class FollowState(DrivingState):
-    """Follow a leading vehicle — maintain safe distance (10m), match speed."""
+    """Follow a leading vehicle — maintain safe distance (8m), match speed."""
 
-    TARGET_FOLLOWING_DISTANCE = 10.0  # [m]
+    TARGET_FOLLOWING_DISTANCE = 7.0   # [m] (相対距離保持目標)
+    STOP_DISTANCE = 3.5               # [m] (完全停止・ブレーキ閾値、遅延を考慮)
     FOLLOWING_KP = 0.5                # speed adjustment gain
 
-    # ---- hardcoded parameters (35 km/h ceiling) ----------------------------
+    # ---- MPC parameters (same cornering capability as FollowPathState) ------
     _V_MAX_DEFAULT = 35.0   # [km/h] — ceiling, actual v_max is dynamic
     AY_MAX = 9.5
-    Q = [5_000_000.0, 100_000_000.0, 200_000.0]
-    R = [100_000.0, 1_000.0]
+    # Q[0]=e_y (lateral), Q[1]=e_psi (heading), Q[2]=t (speed tracking)
+    # Same as FollowPathState to maintain identical corner-tracking ability
+    Q = [1_000_000.0, 100_000_000.0, 850_000.0]
+    # R[0]=v, R[1]=delta (steering) — R[1]=100 to allow full steering in corners
+    R = [100_000.0, 100.0]
     QN = [1_000_000.0, 1_000.0, 10_000.0]
 
-    VEHICLE_DETECT_DISTANCE = 15.0
-    VEHICLE_WIDTH_WITH_MARGIN = 2.30
+    VEHICLE_DETECT_DISTANCE = 12.0
+    VEHICLE_WIDTH_WITH_MARGIN = 2.80
+
+    CLEAR_HYSTERESIS_SEC = 1.5  # Must remain clear for 1.5 seconds continuously before returning to follow_path
+
+    def __init__(self) -> None:
+        self._clear_start_time: Optional[float] = None
 
     @property
     def name(self) -> str:
@@ -367,9 +383,21 @@ class FollowState(DrivingState):
 
         eff_dist = _get_effective_forward_distance(ctx)
 
-        # No forward vehicle/obstacle anymore → back to follow_path
-        if eff_dist is None or eff_dist >= self.VEHICLE_DETECT_DISTANCE:
-            return "follow_path"
+        # Check if clearance is completely clear ahead (no V2X leader AND no LiDAR obstacle within 5m)
+        has_v2x_leader = (ctx.forward_vehicle_distance is not None and ctx.forward_vehicle_distance < self.VEHICLE_DETECT_DISTANCE)
+        has_lidar_close_obstacle = (ctx.lidar_forward_clearance is not None and ctx.lidar_forward_clearance < 5.0)
+
+        # 1.5s Hysteresis: Only return to follow_path if path remains clear for >= 1.5s continuously
+        is_forward_clear = (not has_v2x_leader and not has_lidar_close_obstacle)
+        if is_forward_clear:
+            if self._clear_start_time is None:
+                self._clear_start_time = ctx.current_time_sec
+            elapsed_clear = ctx.current_time_sec - self._clear_start_time
+            if elapsed_clear >= self.CLEAR_HYSTERESIS_SEC:
+                self._clear_start_time = None
+                return "follow_path"
+        else:
+            self._clear_start_time = None  # Instantly reset timer if vehicle/obstacle is detected
 
         max_side = max(ctx.overtake_width_left, ctx.overtake_width_right)
         has_clearance = max_side > self.VEHICLE_WIDTH_WITH_MARGIN
@@ -381,8 +409,7 @@ class FollowState(DrivingState):
             return "overtake"
 
         # Stuck detection: ONLY trigger Recovery if NOT intentionally waiting behind a leader/obstacle
-        # If we are waiting behind a stopped leader without clearance, suppress Recovery false-alarm
-        is_waiting_behind_leader = (eff_dist < 12.0 and not has_clearance)
+        is_waiting_behind_leader = (eff_dist is not None and eff_dist < 10.0 and not has_clearance)
         if not is_waiting_behind_leader:
             if (not ctx.is_in_recovery_cooldown
                     and ctx.time_stopped_sec >= STUCK_DURATION
@@ -394,17 +421,25 @@ class FollowState(DrivingState):
     # -- dynamic v_max -------------------------------------------------------
 
     def get_adjusted_v_max_kmh(self, ctx: StateContext) -> float:
-        """Compute dynamic v_max [km/h] to maintain following distance (10m)."""
+        """Compute dynamic v_max [km/h] with strict distance governor to maintain 8m relative distance."""
         eff_dist = _get_effective_forward_distance(ctx)
         if eff_dist is None:
             return self._V_MAX_DEFAULT
 
         fwd_speed = ctx.forward_vehicle_speed if ctx.forward_vehicle_speed is not None else 0.0
-        distance_error = eff_dist - self.TARGET_FOLLOWING_DISTANCE
-        target_mps = fwd_speed + self.FOLLOWING_KP * distance_error
-        target_kmh = target_mps * 3.6
 
-        # Allow full stop (0 km/h min) when behind a stopped or close leader to maintain safe distance
+        if eff_dist <= self.STOP_DISTANCE:
+            target_mps = 0.0
+        elif eff_dist < self.TARGET_FOLLOWING_DISTANCE:
+            # Distance governor: ego speed must never exceed leader speed when closer than 8.0m
+            ratio = (eff_dist - self.STOP_DISTANCE) / (self.TARGET_FOLLOWING_DISTANCE - self.STOP_DISTANCE)
+            target_mps = fwd_speed * ratio
+        else:
+            # Normal following: match speed + proportional distance error
+            distance_error = eff_dist - self.TARGET_FOLLOWING_DISTANCE
+            target_mps = fwd_speed + self.FOLLOWING_KP * distance_error
+
+        target_kmh = target_mps * 3.6
         return float(np.clip(target_kmh, 0.0, self._V_MAX_DEFAULT))
 
 
@@ -426,7 +461,7 @@ class OvertakeState(DrivingState):
     def __init__(self) -> None:
         self._overtake_side: str = "left"  # "left" or "right"
         self._enter_time: Optional[float] = None
-        self._calculated_offset: float = 1.8
+        self._calculated_offset: float = 2.5
 
     @property
     def name(self) -> str:

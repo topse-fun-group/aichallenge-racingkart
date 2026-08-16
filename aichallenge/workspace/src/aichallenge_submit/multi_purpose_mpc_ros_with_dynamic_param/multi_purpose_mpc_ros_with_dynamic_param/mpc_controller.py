@@ -145,12 +145,18 @@ class MPCController(Node):
         self.declare_parameter("use_boost_acceleration", False)
         self.declare_parameter("use_obstacle_avoidance", False)
         self.declare_parameter("use_stats", False)
+        self.declare_parameter("vehicle_id", os.environ.get("VEHICLE_ID", "default"))
 
         # get parameters
         self.use_sim_time = self.get_parameter("use_sim_time").get_parameter_value().bool_value
         self.USE_BUG_ACC = self.get_parameter("use_boost_acceleration").get_parameter_value().bool_value
         self.USE_OBSTACLE_AVOIDANCE = self.get_parameter("use_obstacle_avoidance").get_parameter_value().bool_value
         self.use_stats = self.get_parameter("use_stats").get_parameter_value().bool_value
+        self._vehicle_id = self.get_parameter("vehicle_id").get_parameter_value().string_value
+        if self._vehicle_id in ["default", "A0", ""]:
+            domain_id = int(os.environ.get("ROS_DOMAIN_ID", "1"))
+            self._vehicle_id = f"d{domain_id}"
+        self.get_logger().info(f"VEHICLE ID INITIALIZED AS: {self._vehicle_id} (ROS_DOMAIN_ID={os.environ.get('ROS_DOMAIN_ID', '1')})")
 
         self._config_path = config_path
         self._ref_vel_config_path: Optional[str] = ref_vel_config_path
@@ -661,8 +667,15 @@ class MPCController(Node):
 
     def _v2x_callback(self, msg: V2XVehiclePositionArray) -> None:
         self._v2x_tracker.update(msg)
+        active_ids = self._v2x_tracker.active_vehicle_ids()
+        self.get_logger().info(f"V2X active ids: {active_ids}, ego id: {self._vehicle_id}", throttle_duration_sec=2.0)
+
         if self.USE_OBSTACLE_AVOIDANCE:
-            predictions = self._v2x_tracker.predict_all(self._v2x_t_samples)
+            predictions = {}
+            for vid in active_ids:
+                if vid == self._vehicle_id:
+                    continue  # Exclude self vehicle
+                predictions[vid] = self._v2x_tracker.predict_positions(vid, self._v2x_t_samples)
             self._dynamic_obstacles = predictions_to_obstacles(
                 predictions, self._v2x_vehicle_radius)
             self._obstacles_updated = True
@@ -891,9 +904,9 @@ class MPCController(Node):
 
     def _detect_forward_vehicle(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
         """Return (distance, speed, heading_rad) of the nearest V2X vehicle directly in front in the same lane."""
-        HALF_ANGLE = np.deg2rad(20.0)      # Narrow to ±20 deg forward cone
-        MAX_DIST = 10.0                    # 10m max forward detection distance
-        MAX_LATERAL_DIFF = 2.0             # Lateral tolerance [m] to eliminate adjacent lanes / opposite track
+        HALF_ANGLE = np.deg2rad(45.0)      # ±45 deg forward cone to maintain tracking throughout turns
+        MAX_DIST = 15.0                    # 15m max forward detection distance
+        MAX_LATERAL_DIFF = 3.5             # Lateral tolerance [m] covering full track width
 
         pose = odom_to_pose_2d(self._odom)  # type: ignore
         best_dist: Optional[float] = None
@@ -904,6 +917,9 @@ class MPCController(Node):
         sin_t = np.sin(pose.theta)
 
         for vid in self._v2x_tracker.active_vehicle_ids():
+            if vid == self._vehicle_id:
+                continue  # Exclude self vehicle
+
             buf = self._v2x_tracker._samples.get(vid)
             if not buf:
                 continue
@@ -915,11 +931,11 @@ class MPCController(Node):
             x_rel = cos_t * dx + sin_t * dy
             y_rel = -sin_t * dx + cos_t * dy
 
-            # Must be ahead in longitudinal direction
-            if x_rel < 0.5 or x_rel > MAX_DIST:
+            # Must be ahead in longitudinal direction (any distance ahead > 0.0m)
+            if x_rel <= 0.0 or x_rel > MAX_DIST:
                 continue
 
-            # Must be in the same lane laterally
+            # Must be in the same track corridor laterally
             if abs(y_rel) > MAX_LATERAL_DIFF:
                 continue
 
@@ -967,7 +983,8 @@ class MPCController(Node):
 
         fwd_dist, fwd_speed, fwd_heading = self._detect_forward_vehicle()
         left_w, right_w = self._lidar_processor.get_overtake_widths()
-        lidar_clearance = self._lidar_processor.get_forward_clearance()
+        lidar_clearance = self._lidar_processor.get_forward_clearance(half_angle_deg=80.0)
+        range_clearance = self._lidar_processor.get_range_clearance()
 
         if self._start_time is None:
             self._start_time = now_sec
@@ -1015,6 +1032,7 @@ class MPCController(Node):
             overtake_width_left=left_w,
             overtake_width_right=right_w,
             lidar_forward_clearance=lidar_clearance,
+            lidar_range_clearance=range_clearance,
             time_stopped_sec=time_stopped,
             is_in_recovery_cooldown=is_cooldown,
         )
@@ -1033,6 +1051,7 @@ class MPCController(Node):
         self._mpc.update_Q(self._mpc_cfg.Q)
 
         self._mpc_cfg.R = sparse.diags(params.R)
+        self._mpc.update_R(self._mpc_cfg.R)
         self._mpc_cfg.QN = sparse.diags(params.QN)
         self._mpc.update_QN(self._mpc_cfg.QN)
 
@@ -1163,13 +1182,12 @@ class MPCController(Node):
                 with self._stats.time_block("control"):
                     u, max_delta = self._mpc.get_control()
 
-            if self._ref_vel_configulator is not None:
+            # FollowState uses dynamic following speed; skip static ref_vel overwrite
+            if self._ref_vel_configulator is not None and not isinstance(current_state, FollowState):
                 ref_vel_mps = self._ref_vel_configulator.get_ref_vel(self._mpc.model.wp_id)
-                ref_vel_kmph = min(
-                    kmh_to_m_per_sec(ref_vel_mps),
-                    self._mpc_cfg.v_max)
-                self._mpc.update_v_max(ref_vel_kmph)
-                v_ref: List[float] = [ref_vel_kmph] * len(self._reference_path.waypoints)
+                ref_vel_mps_capped = min(ref_vel_mps, self._mpc_cfg.v_max)
+                self._mpc.update_v_max(ref_vel_mps_capped)
+                v_ref: List[float] = [ref_vel_mps_capped] * len(self._reference_path.waypoints)
                 self._reference_path.set_v_ref(v_ref)
 
             # override by brake command if control is disabled
@@ -1208,6 +1226,10 @@ class MPCController(Node):
                 acc = self.KP * (u[0] - v)
                 # print(f"v: {v}, u[0]: {u[0]}, acc: {acc}")
                 acc = np.clip(acc, self._mpc_cfg.a_min, self._mpc_cfg.a_max)
+
+            # FollowState: Limit positive acceleration to prevent rear-end collisions due to latency
+            if isinstance(current_state, FollowState):
+                acc = np.clip(acc, self._mpc_cfg.a_min, 1.0)  # max 1.0 m/s² (half of a_max)
 
             # apply low pass filter to control signal
             acc = self._last_acc + (acc - self._last_acc) * self._mpc_cfg.accel_low_pass_gain
