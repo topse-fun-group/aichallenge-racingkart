@@ -10,6 +10,7 @@ matplotlib.use('Agg')  # Non-interactive backend for saving PNGs
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.collections import LineCollection
+import matplotlib.patches as mpatches
 import matplotlib.image as mpimg
 
 # Ensure robust font rendering across Docker containers
@@ -18,6 +19,7 @@ matplotlib.rcParams['axes.unicode_minus'] = False
 
 import rclpy
 from rclpy.node import Node
+from std_msgs.msg import String
 from nav_msgs.msg import Odometry
 from autoware_auto_control_msgs.msg import AckermannControlCommand
 from visualization_msgs.msg import MarkerArray
@@ -41,6 +43,7 @@ class TrajectoryAnalyzer(Node):
         self.v_data = []  # m/s
         self.a_cmd_data = []  # m/s^2
         self.steer_cmd_data = []  # rad
+        self.v2x_mode_data = []  # V2X Mode ("NORMAL", "FOLLOWING", "OVERTAKING", "EMERGENCY_BRAKE")
 
         self.ref_x = []
         self.ref_y = []
@@ -80,9 +83,16 @@ class TrajectoryAnalyzer(Node):
             self.ref_callback,
             1
         )
+        self.sub_v2x_mode = self.create_subscription(
+            String,
+            "/mpc/v2x_mode",
+            self.v2x_mode_callback,
+            10
+        )
 
         self.current_cmd_acc = 0.0
         self.current_cmd_steer = 0.0
+        self.current_v2x_mode = "NORMAL"
 
         # Periodic status logger & plot saver every 10 seconds
         self.timer = self.create_timer(10.0, self.save_analysis_plots)
@@ -161,6 +171,9 @@ class TrajectoryAnalyzer(Node):
             self.ref_y = ref_y
             self.get_logger().info(f"Captured updated reference path with {len(self.ref_x)} points.")
 
+    def v2x_mode_callback(self, msg: String):
+        self.current_v2x_mode = msg.data
+
     def odom_callback(self, msg: Odometry):
         t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         x = msg.pose.pose.position.x
@@ -182,6 +195,7 @@ class TrajectoryAnalyzer(Node):
         self.v_data.append(v)
         self.a_cmd_data.append(self.current_cmd_acc)
         self.steer_cmd_data.append(self.current_cmd_steer)
+        self.v2x_mode_data.append(self.current_v2x_mode)
 
         # Lap completion detection (distance to start point < 5.0m after minimum 15s)
         dist_to_start = math.hypot(x - self.start_x, y - self.start_y)
@@ -470,10 +484,49 @@ class TrajectoryAnalyzer(Node):
             ax1.set_xlim(min(self.ref_x) - margin, max(self.ref_x) + margin)
             ax1.set_ylim(min(self.ref_y) - margin, max(self.ref_y) + margin)
 
+        # Extract contiguous intervals of V2X modes for background shading
+        mode_intervals = []
+        n_pts = len(s_arr)
+        if len(self.v2x_mode_data) >= n_pts and n_pts > 0:
+            modes = self.v2x_mode_data[:n_pts]
+            cur_mode = modes[0]
+            start_s = s_arr[0]
+            for i in range(1, n_pts):
+                if modes[i] != cur_mode:
+                    mode_intervals.append((cur_mode, start_s, s_arr[i]))
+                    cur_mode = modes[i]
+                    start_s = s_arr[i]
+            mode_intervals.append((cur_mode, start_s, s_arr[-1]))
+
+        MODE_COLORS = {
+            "FOLLOWING": ("#f59e0b", 0.16, "Following (ACC)"),
+            "OVERTAKING": ("#a855f7", 0.16, "Overtaking"),
+            "EMERGENCY_BRAKE": ("#f43f5e", 0.22, "Emergency Brake"),
+            "NORMAL": ("#38bdf8", 0.05, "Normal"),
+        }
+
+        # Build V2X Legend Handles for present modes
+        present_modes = set(self.v2x_mode_data[:n_pts]) if len(self.v2x_mode_data) >= n_pts else set()
+        v2x_legend_handles = []
+        for m_key in ["FOLLOWING", "OVERTAKING", "EMERGENCY_BRAKE"]:
+            if m_key in present_modes:
+                col, alpha, lbl = MODE_COLORS[m_key]
+                v2x_legend_handles.append(mpatches.Patch(color=col, alpha=0.5, label=f"V2X: {lbl}"))
+
+        if len(v2x_legend_handles) == 0 and len(present_modes) > 0:
+            v2x_legend_handles.append(mpatches.Patch(color='#94a3b8', alpha=0.25, label="V2X: 100% Normal (Single / Clear)"))
+
         # =========================================================
         # Plot 2: Velocity & Lateral Deviation vs Distance
         # =========================================================
         ax2 = axes[0, 1]
+
+        # Draw V2X Mode background shading
+        for m_name, s_start, s_end in mode_intervals:
+            if m_name in MODE_COLORS and m_name != "NORMAL":
+                col, alpha, _ = MODE_COLORS[m_name]
+                ax2.axvspan(s_start, s_end, color=col, alpha=alpha, zorder=1)
+
         line_v, = ax2.plot(s_arr, v_arr, 'b-', label='Speed (km/h)', linewidth=2.0, zorder=3)
         ax2.set_xlabel('Distance s [m]', fontweight='bold', fontsize=9)
         ax2.set_ylabel('Speed [km/h]', color='b', fontweight='bold', fontsize=9)
@@ -500,7 +553,7 @@ class TrajectoryAnalyzer(Node):
                          bbox=dict(boxstyle='round,pad=0.15', facecolor='#dc2626', edgecolor='black', alpha=0.85))
 
         ax2.set_title('2. Velocity & Lateral Deviation (Bottom: Distance s | Top: Time t)', fontsize=10.5, fontweight='bold')
-        ax2.legend(handles=[line_v, line_ey], loc='lower right', fontsize=8, framealpha=0.85)
+        ax2.legend(handles=[line_v, line_ey] + v2x_legend_handles, loc='lower right', fontsize=7.8, framealpha=0.85)
 
         # Secondary top x-axis for Elapsed Time [s]
         if len(s_arr) > 1 and s_arr[-1] > s_arr[0]:
@@ -520,6 +573,12 @@ class TrajectoryAnalyzer(Node):
         # =========================================================
         ax3 = axes[1, 0]
         d_steer = np.diff(steer_arr, prepend=steer_arr[0]) / np.clip(dt_arr, 0.01, 1.0)
+
+        # Draw V2X Mode background shading
+        for m_name, s_start, s_end in mode_intervals:
+            if m_name in MODE_COLORS and m_name != "NORMAL":
+                col, alpha, _ = MODE_COLORS[m_name]
+                ax3.axvspan(s_start, s_end, color=col, alpha=alpha, zorder=1)
 
         # Highlight oscillation zones with subtle red shade along track distance s
         for p in unstable_pts:
@@ -549,7 +608,7 @@ class TrajectoryAnalyzer(Node):
                          bbox=dict(boxstyle='round,pad=0.15', facecolor='#dc2626', edgecolor='black', alpha=0.85))
 
         ax3.set_title('3. Control Stability & Rule Compliance (Bottom: Distance s | Top: Time t)', fontsize=10.5, fontweight='bold')
-        ax3.legend(handles=[line_acc, line_steer_rate], loc='upper right', fontsize=8, framealpha=0.85)
+        ax3.legend(handles=[line_acc, line_steer_rate] + v2x_legend_handles, loc='upper right', fontsize=7.8, framealpha=0.85)
 
         # Secondary top x-axis for Elapsed Time [s] using interpolation
         if len(s_arr) > 1 and s_arr[-1] > s_arr[0]:
@@ -589,7 +648,8 @@ class TrajectoryAnalyzer(Node):
 
         report += "[BADGE REFERENCE & LEGEND]\n"
         report += " [T1..T4] CYAN STAR    : Lap-Time Loss Points (Apex / Accel / Line)\n"
-        report += " [U1..U4] RED TRIANGLE : Control Instability Points (Hunting / Jitter)\n\n"
+        report += " [U1..U4] RED TRIANGLE : Control Instability Points (Hunting / Jitter)\n"
+        report += " [V2X BANDS] SHADED BG : Amber=Following, Purple=Overtaking, Rose=Brake\n\n"
 
         report += "[LAP TIME SUMMARY]\n"
         if len(self.lap_times) == 0:
@@ -599,6 +659,16 @@ class TrajectoryAnalyzer(Node):
                 report += f"  - Lap {idx}: {ltime:.2f} s\n"
             report += f"  >> Fastest Lap: {min(self.lap_times):.2f} s | Average: {np.mean(self.lap_times):.2f} s\n"
         report += "\n"
+
+        if len(self.v2x_mode_data) >= n_pts and n_pts > 0:
+            report += "[V2X MODE OCCURRENCE PROFILE]\n"
+            modes = self.v2x_mode_data[:n_pts]
+            for m_key in ["NORMAL", "FOLLOWING", "OVERTAKING", "EMERGENCY_BRAKE"]:
+                cnt = modes.count(m_key)
+                if cnt > 0:
+                    pct = (cnt / n_pts) * 100.0
+                    report += f"  - {m_key:<15}: {pct:5.1f}% ({cnt} steps)\n"
+            report += "\n"
 
         report += "[*] TOP LAP-TIME IMPROVEMENT AREAS (T1-T4 Details)\n"
         if len(time_loss_pts) == 0:

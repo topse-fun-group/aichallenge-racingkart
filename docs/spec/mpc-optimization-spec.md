@@ -56,6 +56,7 @@
 | `/localization/kinematic_state` | `nav_msgs/msg/Odometry` | 実走行位置 $(x, y)$、実車速 $v$ の計測 |
 | `/control/command/control_cmd` | `autoware_auto_control_msgs/msg/AckermannControlCommand` | 目標加速度 $a_x$、操舵角 $\delta$ の計測 |
 | `/mpc/ref_path` | `visualization_msgs/msg/MarkerArray` | 参照走行ライン $(x_{ref}, y_{ref})$ の取得・横偏差 $e_y$ 算出 |
+| `/mpc/v2x_mode` | `std_msgs/msg/String` | V2X制御モード（`NORMAL`, `FOLLOWING`, `OVERTAKING`, `EMERGENCY_BRAKE`）の取得・同期記録 |
 
 ---
 
@@ -100,16 +101,19 @@
   - ⭐（タイムロス箇所 `T1..T4`）と ▲（制御不安定箇所 `U1..U4`）をコンパクトバッジでオーバーレイ表示。
 - **Subplot 2 (Velocity Profile & Optimization Points)**:
   - **デュアル X 軸**: 下軸に走破距離 $s$ [m]、上軸に経過時間 $t$ [s] を完全連動表示。
+  - **V2X モード背景色帯（`axvspan`）**: 走行距離 $s$ 軸に沿って、他車対応モード（🟨 `FOLLOWING` 淡アンバー / 🟪 `OVERTAKING` 淡パープル / 🟥 `EMERGENCY_BRAKE` 淡ローズ / 単独時 `100% Normal` 凡例）を半透明シェードで色分け描画。
   - 距離 $s$ [m] に対する車速推移 $v(s)$ および横偏差 $e_y(s)$。
   - ボトムスピード低下点や加速遅延区間を `T1..T4` バッジでハイライト。
 - **Subplot 3 (Control Stability & Rule Compliance)**:
   - **デュアル X 軸**: 下軸に走破距離 $s$ [m]、上軸に経過時間 $t$ [s] を完全連動表示（Subplot 2 と上下で位置・時間完全同期）。
+  - **V2X モード背景色帯（`axvspan`）**: Subplot 2 と同期した他車対応モードの色帯を描画。
   - 加速度指令 $a_x(s)$ とステアリング角速度 $|\dot{\delta}(s)|$。
   - 半透明赤色シェード（`axvspan`）と `U1..U4` バッジにより、発振区間をコース位置および時間基準で明示。
 - **Subplot 4 (Diagnostics Dashboard & Lap Summary)**:
   - **コース・リファレンス基本指標**: 全周基準走行距離（約 351.7 m / 352 ウェイポイント）、スタート/フィニッシュ座標。
   - 識別バッジ凡例（100% ASCII英語表記・文字化けゼロ）。
   - 各周ラップタイム、ベストタイム、平均タイム。
+  - **[V2X MODE OCCURRENCE PROFILE]**: 走行中に各V2Xモード（`NORMAL`, `FOLLOWING`, `OVERTAKING`, `EMERGENCY_BRAKE`）が発生した比率（%）とステップ数を集計出力。
   - **タイム短縮改善ポイント Top 4 (`T1..T4`)**（発生距離 $s$、車速、対策アドバイス）。
   - **制御不安定診断 Top 4 (`U1..U4`)**（発生距離 $s$、角速度、**発振周波数 $f$ [Hz]、継続時間 $\Delta t$ [s]**、MPC パラメータチューニング推奨値）。
   - 加速度ルール適合判定 (PASS/FAIL)。

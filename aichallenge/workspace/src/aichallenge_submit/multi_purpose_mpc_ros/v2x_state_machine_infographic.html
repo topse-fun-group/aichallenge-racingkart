@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>V2X 状態遷移・挙動仕様＆懸念点インフォグラフィックス</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&family=Noto+Sans+JP:wght@400;500;700;900&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    :root {
+      --bg-primary: #0b0f19;
+      --bg-secondary: #111827;
+      --bg-card: rgba(17, 24, 39, 0.85);
+      --border-card: rgba(255, 255, 255, 0.08);
+      --border-glow: rgba(59, 130, 246, 0.3);
+      --text-main: #f3f4f6;
+      --text-muted: #9ca3af;
+      --accent-blue: #3b82f6;
+      --accent-cyan: #06b6d4;
+      --accent-emerald: #10b981;
+      --accent-amber: #f59e0b;
+      --accent-rose: #f43f5e;
+      --accent-purple: #8b5cf6;
+      --font-sans: 'Inter', 'Noto Sans JP', -apple-system, BlinkMacSystemFont, sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg-primary);
+      color: var(--text-main);
+      font-family: var(--font-sans);
+      line-height: 1.6;
+      padding: 2.5rem 1.5rem;
+      background-image: 
+        radial-gradient(at 0% 0%, rgba(59, 130, 246, 0.12) 0px, transparent 50%),
+        radial-gradient(at 100% 100%, rgba(139, 92, 246, 0.1) 0px, transparent 50%);
+      background-attachment: fixed;
+    }
+
+    .container {
+      max-width: 1240px;
+      margin: 0 auto;
+    }
+
+    /* Header */
+    .header {
+      text-align: center;
+      margin-bottom: 3.5rem;
+      position: relative;
+    }
+
+    .badge-header {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.35rem 1rem;
+      background: rgba(59, 130, 246, 0.15);
+      border: 1px solid rgba(59, 130, 246, 0.4);
+      border-radius: 9999px;
+      color: var(--accent-cyan);
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-bottom: 1rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .title {
+      font-size: 2.5rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      background: linear-gradient(135deg, #ffffff 0%, #cbd5e1 50%, #94a3b8 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 0.75rem;
+    }
+
+    .subtitle {
+      color: var(--text-muted);
+      font-size: 1.1rem;
+      max-width: 800px;
+      margin: 0 auto;
+    }
+
+    /* Grid Sections */
+    .section-title {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: #ffffff;
+      margin-bottom: 1.5rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 1px solid var(--border-card);
+    }
+
+    .section-title-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 2rem;
+      height: 2rem;
+      border-radius: 0.5rem;
+      background: rgba(59, 130, 246, 0.2);
+      color: var(--accent-cyan);
+      font-size: 1.1rem;
+    }
+
+    /* Cards */
+    .card {
+      background: var(--bg-card);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--border-card);
+      border-radius: 1rem;
+      padding: 1.75rem;
+      margin-bottom: 2rem;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3), 0 8px 10px -6px rgba(0, 0, 0, 0.3);
+      transition: border-color 0.2s ease, transform 0.2s ease;
+    }
+
+    .card:hover {
+      border-color: var(--border-glow);
+    }
+
+    /* State Grid */
+    .state-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+      gap: 1.25rem;
+      margin-bottom: 2.5rem;
+    }
+
+    .state-card {
+      background: rgba(30, 41, 59, 0.5);
+      border: 1px solid var(--border-card);
+      border-radius: 0.85rem;
+      padding: 1.25rem;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .state-card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 4px;
+      height: 100%;
+    }
+
+    .state-card.normal::before { background: var(--accent-cyan); }
+    .state-card.following::before { background: var(--accent-amber); }
+    .state-card.overtaking::before { background: var(--accent-purple); }
+    .state-card.emergency::before { background: var(--accent-rose); }
+
+    .state-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.75rem;
+    }
+
+    .state-name {
+      font-family: var(--font-mono);
+      font-weight: 700;
+      font-size: 1.1rem;
+    }
+
+    .state-card.normal .state-name { color: var(--accent-cyan); }
+    .state-card.following .state-name { color: var(--accent-amber); }
+    .state-card.overtaking .state-name { color: var(--accent-purple); }
+    .state-card.emergency .state-name { color: var(--accent-rose); }
+
+    .state-param-list {
+      list-style: none;
+      font-size: 0.88rem;
+      color: #cbd5e1;
+    }
+
+    .state-param-item {
+      display: flex;
+      justify-content: space-between;
+      padding: 0.35rem 0;
+      border-bottom: 1px dashed rgba(255, 255, 255, 0.06);
+    }
+
+    .param-key { color: var(--text-muted); }
+    .param-val { font-family: var(--font-mono); font-weight: 600; }
+
+    /* Flowchart Container */
+    .flowchart-container {
+      background: #0f172a;
+      border-radius: 0.75rem;
+      padding: 1.5rem;
+      overflow-x: auto;
+      text-align: center;
+      margin: 1.5rem 0;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .mermaid {
+      font-family: var(--font-sans);
+    }
+
+    /* Concern Items */
+    .concern-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(540px, 1fr));
+      gap: 1.5rem;
+    }
+
+    @media (max-width: 768px) {
+      .concern-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .concern-card {
+      background: rgba(23, 23, 37, 0.75);
+      border: 1px solid var(--border-card);
+      border-radius: 0.85rem;
+      padding: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+
+    .concern-card.critical {
+      border-left: 4px solid var(--accent-rose);
+    }
+
+    .concern-card.warning {
+      border-left: 4px solid var(--accent-amber);
+    }
+
+    .concern-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.75rem;
+    }
+
+    .concern-title {
+      font-size: 1.15rem;
+      font-weight: 700;
+      color: #fff;
+    }
+
+    .severity-badge {
+      font-size: 0.75rem;
+      font-weight: 700;
+      padding: 0.25rem 0.6rem;
+      border-radius: 0.35rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .severity-badge.critical {
+      background: rgba(244, 63, 94, 0.15);
+      color: var(--accent-rose);
+      border: 1px solid rgba(244, 63, 94, 0.3);
+    }
+
+    .severity-badge.warning {
+      background: rgba(245, 158, 11, 0.15);
+      color: var(--accent-amber);
+      border: 1px solid rgba(245, 158, 11, 0.3);
+    }
+
+    .concern-body {
+      font-size: 0.92rem;
+      color: #cbd5e1;
+      margin-bottom: 1rem;
+    }
+
+    .concern-cause {
+      background: rgba(0, 0, 0, 0.3);
+      padding: 0.75rem 1rem;
+      border-radius: 0.5rem;
+      font-size: 0.85rem;
+      margin-bottom: 0.75rem;
+      border-left: 2px solid #64748b;
+    }
+
+    .concern-cause code {
+      font-family: var(--font-mono);
+      color: var(--accent-cyan);
+    }
+
+    .concern-fix {
+      background: rgba(16, 185, 129, 0.08);
+      border: 1px solid rgba(16, 185, 129, 0.2);
+      padding: 0.75rem 1rem;
+      border-radius: 0.5rem;
+      font-size: 0.85rem;
+      color: #a7f3d0;
+    }
+
+    .concern-fix strong {
+      color: var(--accent-emerald);
+    }
+
+    /* Comparison Table */
+    .table-container {
+      overflow-x: auto;
+      margin-top: 1rem;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+      text-align: left;
+    }
+
+    th {
+      background: rgba(30, 41, 59, 0.8);
+      color: #e2e8f0;
+      padding: 0.75rem 1rem;
+      font-weight: 600;
+      border-bottom: 1px solid var(--border-card);
+    }
+
+    td {
+      padding: 0.85rem 1rem;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      color: #cbd5e1;
+    }
+
+    tr:hover td {
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .code-tag {
+      font-family: var(--font-mono);
+      background: rgba(255, 255, 255, 0.08);
+      padding: 0.15rem 0.4rem;
+      border-radius: 0.25rem;
+      font-size: 0.82rem;
+      color: var(--accent-cyan);
+    }
+
+    /* Footer */
+    .footer {
+      text-align: center;
+      margin-top: 4rem;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      border-top: 1px solid var(--border-card);
+      padding-top: 1.5rem;
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+
+  <!-- Header -->
+  <header class="header">
+    <div class="badge-header">🚗 Autonomous Racing MPC Architecture</div>
+    <h1 class="title">V2X Mode State Machine & Concerns Analysis</h1>
+    <p class="subtitle">
+      <code>_update_v2x_mode</code> メソッドにおける他車追従・追い越し・緊急ブレーキ状態遷移の構造解説と、実走環境で発生し得る潜在リスクの分析
+    </p>
+  </header>
+
+  <!-- 1. 4つのステート概要 -->
+  <section>
+    <div class="section-title">
+      <span class="section-title-icon">1</span>
+      <span>4つのV2X制御モード一覧</span>
+    </div>
+    
+    <div class="state-grid">
+      <div class="state-card normal">
+        <div class="state-card-header">
+          <div class="state-name">NORMAL</div>
+        </div>
+        <p style="font-size: 0.85rem; color: #94a3b8; margin-bottom: 0.75rem;">通常走行モード。前方に干渉する車両が存在しない状態。</p>
+        <ul class="state-param-list">
+          <li class="state-param-item"><span class="param-key">速度制限</span><span class="param-val" style="color: var(--accent-cyan);">inf (制限なし)</span></li>
+          <li class="state-param-item"><span class="param-key">車両半径</span><span class="param-val">Normal (標準)</span></li>
+          <li class="state-param-item"><span class="param-key">主な動作</span><span class="param-val">MPC最高速度走行</span></li>
+        </ul>
+      </div>
+
+      <div class="state-card following">
+        <div class="state-card-header">
+          <div class="state-name">FOLLOWING</div>
+        </div>
+        <p style="font-size: 0.85rem; color: #94a3b8; margin-bottom: 0.75rem;">前走車追従モード (ACC)。車間距離と前車速度に応じて適応減速。</p>
+        <ul class="state-param-list">
+          <li class="state-param-item"><span class="param-key">速度制限</span><span class="param-val" style="color: var(--accent-amber);">ACC補間速度</span></li>
+          <li class="state-param-item"><span class="param-key">車両半径</span><span class="param-val">Normal (標準)</span></li>
+          <li class="state-param-item"><span class="param-key">主な動作</span><span class="param-val">車間維持・追従</span></li>
+        </ul>
+      </div>
+
+      <div class="state-card overtaking">
+        <div class="state-card-header">
+          <div class="state-name">OVERTAKING</div>
+        </div>
+        <p style="font-size: 0.85rem; color: #94a3b8; margin-bottom: 0.75rem;">追い越しモード。追従耐用時間経過後に車体半径を縮小してパスを確保。</p>
+        <ul class="state-param-list">
+          <li class="state-param-item"><span class="param-key">速度制限</span><span class="param-val" style="color: var(--accent-purple);">inf (制限解除)</span></li>
+          <li class="state-param-item"><span class="param-key">車両半径</span><span class="param-val" style="color: var(--accent-purple);">Overtake (縮小)</span></li>
+          <li class="state-param-item"><span class="param-key">主な動作</span><span class="param-val">積極的追い越し</span></li>
+        </ul>
+      </div>
+
+      <div class="state-card emergency">
+        <div class="state-card-header">
+          <div class="state-name">EMERGENCY_BRAKE</div>
+        </div>
+        <p style="font-size: 0.85rem; color: #94a3b8; margin-bottom: 0.75rem;">緊急制動モード。TTCが危険域または至近距離に接近した際に発動。</p>
+        <ul class="state-param-list">
+          <li class="state-param-item"><span class="param-key">速度制限</span><span class="param-val" style="color: var(--accent-rose);">v_min_safe_mps</span></li>
+          <li class="state-param-item"><span class="param-key">車両半径</span><span class="param-val">Normal (標準)</span></li>
+          <li class="state-param-item"><span class="param-key">主な動作</span><span class="param-val">強減速・衝突回避</span></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2. 状態遷移図 -->
+  <section>
+    <div class="section-title">
+      <span class="section-title-icon">2</span>
+      <span>V2X モード状態遷移図</span>
+    </div>
+
+    <div class="card">
+      <div class="flowchart-container">
+<div class="mermaid">
+stateDiagram-v2
+    [*] --> NORMAL : 起動・スタート抑制 (startup_suppress_sec)
+
+    NORMAL --> EMERGENCY_BRAKE : TTC危険 または min_d < follow_brake
+    FOLLOWING --> EMERGENCY_BRAKE : TTC危険 または min_d < follow_brake
+    OVERTAKING --> EMERGENCY_BRAKE : TTC危険 または min_d < follow_brake
+
+    NORMAL --> FOLLOWING : 前方車あり かつ min_d < follow_start
+    FOLLOWING --> NORMAL : 前方車なし または min_d >= follow_start
+    FOLLOWING --> OVERTAKING : 追従時間 >= overtake_patience かつ min_d <= overtake_gap_min
+
+    OVERTAKING --> NORMAL : 前方車なし かつ min_d >= overtake_clearance (追い越し完了)
+
+    EMERGENCY_BRAKE --> NORMAL : 条件解消時 (elseフォールバック)
+</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3. 設計・実装から見える4大懸念事項 -->
+  <section>
+    <div class="section-title">
+      <span class="section-title-icon">3</span>
+      <span>状態遷移ロジックから見える潜在的な懸念点 (Risk Analysis)</span>
+    </div>
+
+    <div class="concern-grid">
+      <!-- 懸念1 -->
+      <div class="concern-card critical">
+        <div>
+          <div class="concern-header">
+            <div class="concern-title">1. 緊急ブレーキ解除時の「一瞬の急加速」とチャタリング</div>
+            <span class="severity-badge critical">Critical Risk</span>
+          </div>
+          <div class="concern-body">
+            <code>EMERGENCY_BRAKE</code> から車間が少し開いて条件を脱出した際、直前のモードが <code>EMERGENCY_BRAKE</code> であるため、次のステップで <code>NORMAL → FOLLOWING</code> の判定に入れず、末尾の <code>else</code> に落ちて <strong>1ステップだけ <code>NORMAL (速度制限inf)</code></strong> になります。
+          </div>
+          <div class="concern-cause">
+            <strong>原因コード:</strong> <code>elif ... and self._v2x_mode == "NORMAL":</code> となっており、EMERGENCY状態からの復帰先が考慮されておらず <code>else: self._v2x_mode = "NORMAL"</code> にフォールバックするため。
+          </div>
+        </div>
+        <div class="concern-fix">
+          <strong>対策:</strong> 復帰時ヒステリシスを導入し、EMERGENCY解除直後は直接 <code>FOLLOWING</code> に安全に遷移させる。
+        </div>
+      </div>
+
+      <!-- 懸念2 -->
+      <div class="concern-card warning">
+        <div>
+          <div class="concern-header">
+            <div class="concern-title">2. 追従 (ACC) と追い越し条件の構造的矛盾</div>
+            <span class="severity-badge warning">Logic Dilemma</span>
+          </div>
+          <div class="concern-body">
+            <code>OVERTAKING</code> への遷移条件は <code>min_d <= overtake_gap_min</code>（至近距離）です。しかし、<code>FOLLOWING</code> 中は ACC により前車に合わせて適切に減速するため、車間距離が広がり <code>overtake_gap_min</code> まで詰まらない可能性が高いです。
+          </div>
+          <div class="concern-cause">
+            <strong>原因構造:</strong> 「安全に車間を保つ減速ロジック」と「車間を極限まで詰めることを要求する追い越し発動条件」が相反しています。
+          </div>
+        </div>
+        <div class="concern-fix">
+          <strong>対策:</strong> 追い越しトリガーを「車間距離」だけでなく「前車速度が目標より遅い状態が一定時間継続したか」で判定する。
+        </div>
+      </div>
+
+      <!-- 懸念3 -->
+      <div class="concern-card warning">
+        <div>
+          <div class="concern-header">
+            <div class="concern-title">3. 追い越しモードのスタック＆タイムアウト欠如</div>
+            <span class="severity-badge warning">Safety Risk</span>
+          </div>
+          <div class="concern-body">
+            <code>OVERTAKING</code> からの復帰条件は <code>not is_leading_ahead and min_d >= overtake_clearance</code> のみです。横並びのまま抜けなかったり、前車が加速して前方に離れた場合、タイムアウト機構がないため <strong>車体半径を縮小した危険な状態のまま走行を継続</strong> してしまいます。
+          </div>
+          <div class="concern-cause">
+            <strong>原因コード:</strong> <code>OVERTAKING</code> 中に時間制限（<code>overtake_timeout</code>）や前車が遠ざかった場合のフォールバックがない。
+          </div>
+        </div>
+        <div class="concern-fix">
+          <strong>対策:</strong> 追い越しタイムアウト（例: 5秒）を設け、失敗時は安全に <code>FOLLOWING</code> または <code>NORMAL</code> にリセットする。
+        </div>
+      </div>
+
+      <!-- 懸念4 -->
+      <div class="concern-card warning">
+        <div>
+          <div class="concern-header">
+            <div class="concern-title">4. カーブ区間での前方判定ロスト (誤加速)</div>
+            <span class="severity-badge warning">False Acceleration</span>
+          </div>
+          <div class="concern-body">
+            前方判定に固定角度（<code>cos >= 0.5</code>、約60度）を使用しているため、きついコーナー旋回中において前走車が自車の進行ベクトルから外れ、「前方車なし」と誤認してコーナー直前で突然フル加速するリスクがあります。
+          </div>
+          <div class="concern-cause">
+            <strong>原因構造:</strong> 車両の直進ヘディング方向のみで内積を計算しており、コース参照軌道（パスのカーブ沿い）に沿った判定になっていない。
+          </div>
+        </div>
+        <div class="concern-fix">
+          <strong>対策:</strong> 単純なベクトル角ではなく、参照軌道上のフレネ座標（$s$ 距離と $d$ 横ズレ）で前方車を判定する。
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4. パラメータ対比表 -->
+  <section style="margin-top: 2.5rem;">
+    <div class="section-title">
+      <span class="section-title-icon">4</span>
+      <span>各モードの制約・パラメータ比較表</span>
+    </div>
+
+    <div class="card">
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>モード</th>
+              <th>トリガー条件</th>
+              <th>速度制限値 (<code>_v2x_speed_limit</code>)</th>
+              <th>車両半径設定</th>
+              <th>解除・脱出条件</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><span class="code-tag">NORMAL</span></td>
+              <td>初期状態 / 前方クリア</td>
+              <td><code>float('inf')</code> (無制限)</td>
+              <td>通常半径 (<code>_normal</code>)</td>
+              <td>前方車接近 または 衝突危機</td>
+            </tr>
+            <tr>
+              <td><span class="code-tag">FOLLOWING</span></td>
+              <td><code>min_d < follow_start</code></td>
+              <td><code>min(v_max, acc_speed)</code> (動的補間)</td>
+              <td>通常半径 (<code>_normal</code>)</td>
+              <td>前方車離脱 / 追い越し条件成立 / 緊急制動</td>
+            </tr>
+            <tr>
+              <td><span class="code-tag">OVERTAKING</span></td>
+              <td><code>follow_dur >= patience</code> & <code>min_d <= gap_min</code></td>
+              <td><code>float('inf')</code> (制限解除)</td>
+              <td>縮小半径 (<code>_overtake</code>)</td>
+              <td><code>min_d >= clearance</code> (前方車なし)</td>
+            </tr>
+            <tr>
+              <td><span class="code-tag">EMERGENCY_BRAKE</span></td>
+              <td><code>TTC < thresh</code> or <code>min_d < brake</code></td>
+              <td><code>v_min_safe_mps</code> (最低安全速度)</td>
+              <td>通常半径 (<code>_normal</code>)</td>
+              <td>危機回避時 (他条件不成立でNORMALへ)</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <footer class="footer">
+    Multi-Purpose MPC Autonomous Racing System • V2X State Machine Diagnostic Documentation
+  </footer>
+
+</div>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'dark',
+    themeVariables: {
+      primaryColor: '#1e293b',
+      primaryTextColor: '#f8fafc',
+      primaryBorderColor: '#3b82f6',
+      lineColor: '#06b6d4',
+      secondaryColor: '#334155',
+      tertiaryColor: '#0f172a'
+    }
+  });
+</script>
+
+</body>
+</html>

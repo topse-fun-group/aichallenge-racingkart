@@ -445,6 +445,7 @@
                         <strong>デュアル X 軸仕様</strong>:
                         ・下軸（主軸）: <strong>走破距離 $s \text{ [m]}$</strong>（コース位置と完全同期）<br>
                         ・上軸（副軸）: <strong>経過時間 $t \text{ [s]}$</strong>（距離に対応する走行時間をリアルタイム補間）<br>
+                        <strong>V2X モード背景色帯</strong>: 🟨 `FOLLOWING`（淡アンバー）、🟪 `OVERTAKING`（淡パープル）、🟥 `EMERGENCY_BRAKE`（淡ローズ）を背景に自動シェード描画し、前走車追従による減速か旋回減速かを一目識別可能。<br>
                         ・過剰減速点（T1）や偏差急増点（U1）をピンポイントバッジで示し、速度曲線の起伏や立ち上がり波形をクリアに可視化。
                     </p>
                 </div>
@@ -452,6 +453,7 @@
                     <h4>③ Control Stability & Compliance (制御安定性 & レギュレーション)</h4>
                     <p style="font-size: 0.92rem; color: var(--text-secondary);">
                         <strong>デュアル X 軸仕様</strong>: 走破距離 $s \text{ [m]}$（下軸）と経過時間 $t \text{ [s]}$（上軸）で Subplot 2 と完全同期。<br>
+                        <strong>V2X モード背景色帯</strong>: Subplot 2 と同期した他車対応モードの色帯を描画し、追い越し時のステアリング操作や緊急制動時の急ブレーキを因果関係として把握。<br>
                         <strong>赤色ハッチング (背景シェード)</strong>:
                         ・操舵角速度 $|\dot{\delta}| > 0.6\,\text{rad/s}$ の連続切り返し（ハンチング）やスロットルチャタリングが発生している<strong>発振継続区間 $[s_{\text{start}}, s_{\text{end}}]$</strong> を明示。<br>
                         ・加速度波形を一切隠さずに、制御が乱れていた全範囲を直感把握可能。
@@ -463,6 +465,7 @@
                         <strong>コース基本情報</strong>: 全周基準走行距離（約 351.7 m / 352 waypoints）とスタート/ゴール座標（`X=89633.29, Y=43127.57`）。<br>
                         <strong>自動診断レポート (100% ASCII英語表記・文字化けゼロ)</strong>:
                         ・各周ラップタイム、ベスト・平均タイム。<br>
+                        ・<strong>[V2X MODE OCCURRENCE PROFILE]</strong>: 各V2Xモードの発生比率（%）とステップ数を集計表示。<br>
                         ・`[T1..T4]` タイム短縮着目点（発生距離 $s$、車速、推奨アクション）。<br>
                         ・`[U1..U4]` 制御不安定診断（発生距離 $s$、<strong>発振周波数 $f \text{ [Hz]}$、継続時間 $\Delta t \text{ [s]}$</strong>、MPC チューニング推奨値）。<br>
                         ・加速度制約チェック（PASS/FAIL）。
@@ -575,12 +578,15 @@
                         +List v_data
                         +List a_cmd_data
                         +List steer_cmd_data
+                        +List v2x_mode_data
+                        +String current_v2x_mode
                         +List ref_x
                         +List ref_y
                         +List lap_times
                         +__init__(output_dir)
                         +cmd_callback(msg: AckermannControlCommand)
                         +ref_callback(msg: MarkerArray)
+                        +v2x_mode_callback(msg: String)
                         +odom_callback(msg: Odometry)
                         +detect_key_points(s_arr, v_arr, a_arr, steer_arr, dt_arr, ey_arr)
                         +save_analysis_plots()
@@ -602,12 +608,12 @@
                     <tr>
                         <td><span class="code-inline">__init__()</span></td>
                         <td><span class="code-inline">output_dir: str</span></td>
-                        <td>ROS 2 ノード初期化、<span class="code-inline">output_dir</span> パラメータ宣言、サブスクリプション（3種）設定、10秒周期タイマー生成。</td>
+                        <td>ROS 2 ノード初期化、<span class="code-inline">output_dir</span> パラメータ宣言、サブスクリプション（4種: Odom, Cmd, Ref, V2XMode）設定、10秒周期タイマー生成。</td>
                     </tr>
                     <tr>
                         <td><span class="code-inline">odom_callback()</span></td>
                         <td><span class="code-inline">/localization/kinematic_state</span> (Odometry)</td>
-                        <td>車両位置 $(x, y)$、車速 $v = \sqrt{v_x^2 + v_y^2}$、時刻 $t$ をバッファ追記。スタート通過判定により周回ラップタイムを自動計算。</td>
+                        <td>車両位置 $(x, y)$、車速 $v = \sqrt{v_x^2 + v_y^2}$、時刻 $t$、最新のV2Xモードをバッファ追記。スタート通過判定により周回ラップタイムを自動計算。</td>
                     </tr>
                     <tr>
                         <td><span class="code-inline">cmd_callback()</span></td>
@@ -620,6 +626,11 @@
                         <td><span class="diff-changed">[改修済み]</span> MPC参照 raceline 座標 $(x_{\text{ref}}, y_{\text{ref}})$ を受けるたびに最長マーカー配列で全周累積補完。</td>
                     </tr>
                     <tr>
+                        <td><span class="diff-changed">v2x_mode_callback()</span></td>
+                        <td><span class="code-inline">/mpc/v2x_mode</span> (std_msgs/String)</td>
+                        <td><span class="diff-changed">[NEW]</span> MPCから配信される現在の他車対応モード（NORMAL, FOLLOWING, OVERTAKING, EMERGENCY_BRAKE）を随時更新保持。</td>
+                    </tr>
+                    <tr>
                         <td><span class="diff-changed">detect_key_points()</span></td>
                         <td>走行距離 $s$、車速 $v$、加速度 $a$、舵角 $\delta$、周期 $dt$、横偏差 $e_y$</td>
                         <td><span class="diff-changed">[NEW]</span> 2系統の診断アルゴリズム。過剰減速・加速遅延・ライン膨らみ（⭐ Cyan）とステアリングハンチング・制御チャタリング（▲ Red）を自動抽出。</td>
@@ -627,7 +638,7 @@
                     <tr>
                         <td><span class="code-inline">save_analysis_plots()</span></td>
                         <td>内部データバッファ全般</td>
-                        <td>走破距離 $s$ および横偏差 $e_y$ を算出し、<span class="code-inline">detect_key_points()</span> の結果を 2x2 プロット画像および診断ダッシュボード（⭐/▲ マーカー・注釈付き）として PNG 出力。</td>
+                        <td>走破距離 $s$ および横偏差 $e_y$ を算出し、V2Xモード背景色帯、<span class="code-inline">detect_key_points()</span> の結果を 2x2 プロット画像および診断ダッシュボード（⭐/▲ マーカー・注釈・V2X集計付き）として PNG 出力。</td>
                     </tr>
                 </tbody>
             </table>
@@ -667,7 +678,8 @@
                         Sim-->>Analyzer: Publish /localization/kinematic_state
                         MPC-->>Analyzer: Publish /control/command/control_cmd
                         MPC-->>Analyzer: Publish /mpc/ref_path
-                        Analyzer->>Analyzer: Append to Memory Buffers (x, y, v, a, t)
+                        MPC-->>Analyzer: Publish /mpc/v2x_mode
+                        Analyzer->>Analyzer: Append to Memory Buffers (x, y, v, a, v2x_mode, t)
                         Analyzer->>Analyzer: Check Start Line Cross Distance (< 3.0m)
                     end
 

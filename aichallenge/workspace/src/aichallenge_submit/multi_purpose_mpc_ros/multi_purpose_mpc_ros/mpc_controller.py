@@ -20,7 +20,7 @@ from rclpy.parameter import Parameter
 from visualization_msgs.msg import Marker, MarkerArray
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy, QoSHistoryPolicy
 
-from std_msgs.msg import Empty, Bool, Float32MultiArray, Int32
+from std_msgs.msg import Empty, Bool, Float32MultiArray, Int32, String
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Quaternion, Pose2D, Point, Vector3
 from std_msgs.msg import ColorRGBA
@@ -562,6 +562,9 @@ class MPCController(Node):
             MarkerArray, "/mpc/ref_path", latching_qos)
         self._ref_path_pub_dummy = self.create_publisher(
             MarkerArray, "/planning/scenario_planning/lane_driving/behavior_planning/behavior_path_planner/debug/bound", latching_qos)
+
+        self._v2x_mode_pub = self.create_publisher(
+            String, "/mpc/v2x_mode", 1)
 
         # Subscribers
         self._odom_sub = self.create_subscription(
@@ -1210,6 +1213,9 @@ class MPCController(Node):
 
         # Publish control command
         self._publish_control_command(now, u, acc, bug_acc_enabled)
+
+        # Publish current V2X Mode for trajectory analysis
+        self._v2x_mode_pub.publish(String(data=self._v2x_mode))
 
         # Log states
         self._sim_logger.log(self._car, u, t)
