@@ -12,13 +12,13 @@ from launch_ros.actions import Node
 
 def launch_setup(context, *args, **kwargs):
     config_path = (
-        Path(get_package_share_directory("multi_purpose_mpc_ros"))
+        Path(get_package_share_directory("multi_purpose_mpc_ros_with_dynamic_param"))
         / "config"
         / "sim_config.yaml"
     )
 
     mpc_simulation = Node(
-        package="multi_purpose_mpc_ros",
+        package="multi_purpose_mpc_ros_with_dynamic_param",
         executable="run_mpc_simulation.bash",
         name="mpc_simulation",
         output="both",

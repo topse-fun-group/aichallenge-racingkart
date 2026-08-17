@@ -19,19 +19,19 @@ def launch_setup(context, *args, **kwargs):
     use_stats = LaunchConfiguration("use_stats")
 
     config_path = (
-        Path(get_package_share_directory("multi_purpose_mpc_ros"))
+        Path(get_package_share_directory("multi_purpose_mpc_ros_with_dynamic_param"))
         / "config"
         / "config.yaml"
     )
 
     ref_vel_path = (
-        Path(get_package_share_directory("multi_purpose_mpc_ros"))
+        Path(get_package_share_directory("multi_purpose_mpc_ros_with_dynamic_param"))
         / "config"
         / "ref_vel.yaml"
     )
 
     mpc_controller = Node(
-        package="multi_purpose_mpc_ros",
+        package="multi_purpose_mpc_ros_with_dynamic_param",
         executable="run_mpc_controller.bash",
         name="mpc_controller",
         output="both",
@@ -54,7 +54,7 @@ def launch_setup(context, *args, **kwargs):
     )
 
     boost_commander = Node(
-        package="multi_purpose_mpc_ros",
+        package="multi_purpose_mpc_ros_with_dynamic_param",
         executable="boost_commander",
         name="boost_commander",
         output="both",
@@ -68,7 +68,7 @@ def launch_setup(context, *args, **kwargs):
     )
 
     path_constraints_provider = Node(
-        package="multi_purpose_mpc_ros",
+        package="multi_purpose_mpc_ros_with_dynamic_param",
         executable="path_constraints_provider.bash",
         name="path_constraints_provider",
         output="both",

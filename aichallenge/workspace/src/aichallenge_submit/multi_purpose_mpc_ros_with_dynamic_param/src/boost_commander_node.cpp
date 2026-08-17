@@ -5,8 +5,9 @@
 int main(int argc, char *argv[]) {
   rclcpp::init(argc, argv);
   auto node = rclcpp::Node::make_shared("boost_commander");
-  auto command_publisher =
-      std::make_shared<roborovsky::multi_purpose_mpc_ros::BoostCommander>(node);
+  auto command_publisher = std::make_shared<
+      roborovsky::multi_purpose_mpc_ros_with_dynamic_param::BoostCommander>(
+      node);
 
   rclcpp::executors::MultiThreadedExecutor executor;
   executor.add_node(node);

@@ -126,7 +126,7 @@ class MPCConfig:
 
 class MPCController(Node):
 
-    PKG_PATH: str = get_package_share_directory('multi_purpose_mpc_ros') + "/"
+    PKG_PATH: str = get_package_share_directory('multi_purpose_mpc_ros_with_dynamic_param') + "/"
     # MAX_LAPS = 6
     MAX_LAPS = 10000
     BUG_VEL = 40.0 # km/h

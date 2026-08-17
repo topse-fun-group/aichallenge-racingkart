@@ -48,7 +48,7 @@ class MPCConfig:
 
 
 class PathConstraintsProvider(Node):
-    PKG_PATH: str = get_package_share_directory('multi_purpose_mpc_ros') + "/"
+    PKG_PATH: str = get_package_share_directory('multi_purpose_mpc_ros_with_dynamic_param') + "/"
     USE_BUG_ACC = True
     BUG_VEL = 40.0 # km/h
     BUG_ACC = 400.0
