@@ -2,6 +2,7 @@
 <launch>
   <arg name="use_sim_time" default="true"/>
   <arg name="use_obstacle_avoidance" default="true"/>
+  <arg name="vehicle_id" default="$(env VEHICLE_ID default)"/>
   <!-- Track selection: citycircuit uses config.yaml/ref_vel.yaml; other tracks use config_<track>.yaml/ref_vel_<track>.yaml -->
   <arg name="track" default="citycircuit"/>
   <arg name="config_file" default="$(eval &quot;'config.yaml' if '$(var track)' == 'citycircuit' else 'config_' + '$(var track)' + '.yaml'&quot;)"/>
@@ -15,5 +16,6 @@
     <param name="use_boost_acceleration" value="false"/>
     <param name="use_obstacle_avoidance" value="$(var use_obstacle_avoidance)"/>
     <param name="use_stats" value="false"/>
+    <param name="vehicle_id" value="$(var vehicle_id)"/>
   </node>
 </launch>
