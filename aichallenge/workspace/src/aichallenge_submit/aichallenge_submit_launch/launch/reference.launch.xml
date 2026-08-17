@@ -50,10 +50,10 @@
       <arg name="config_file" value="$(find-pkg-share aichallenge_submit_launch)/config/vehicle_velocity_converter.param.yaml"/>
     </include>
     <!-- LaserScan Generator for LiDAR obstacle / wall detection -->
-    <include file="$(find-pkg-share laserscan_generator)/launch/laserscan_generator.launch.xml">
+    <!-- <include file="$(find-pkg-share laserscan_generator)/launch/laserscan_generator.launch.xml">
       <arg name="use_sim_time" value="$(var use_sim_time)"/>
       <arg name="scan_topic" value="/sensing/lidar/scan"/>
-    </include>
+    </include> -->
     <group>
       <push-ros-namespace namespace="imu"/>
       <arg name="imu_corrector_param_file" default="$(find-pkg-share imu_corrector)/config/imu_corrector.param.yaml"/>

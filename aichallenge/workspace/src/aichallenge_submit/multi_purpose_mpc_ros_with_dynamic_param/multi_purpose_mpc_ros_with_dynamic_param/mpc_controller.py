@@ -60,7 +60,7 @@ from multi_purpose_mpc_ros_with_dynamic_param.tools.reference_velocity_configula
 # State machine
 from multi_purpose_mpc_ros_with_dynamic_param.states import StateContext, MPCStateParams, FollowState, ControlMode
 from multi_purpose_mpc_ros_with_dynamic_param.state_manager import StateManager
-from multi_purpose_mpc_ros_with_dynamic_param.lidar_processor import LidarProcessor
+# from multi_purpose_mpc_ros_with_dynamic_param.lidar_processor import LidarProcessor
 
 
 RED = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)
@@ -509,7 +509,7 @@ class MPCController(Node):
         self._target_lateral_offset = 0.0
         self._current_lateral_offset = 0.0
         self._state_manager = StateManager(self)
-        self._lidar_processor = LidarProcessor(self)
+        # self._lidar_processor = LidarProcessor(self)
 
         # V2X tracker for state context — always initialise so the state
         # machine can detect forward vehicles regardless of obstacle-avoidance
@@ -982,9 +982,9 @@ class MPCController(Node):
             time_stopped = 0.0
 
         fwd_dist, fwd_speed, fwd_heading = self._detect_forward_vehicle()
-        left_w, right_w = self._lidar_processor.get_overtake_widths()
-        lidar_clearance = self._lidar_processor.get_forward_clearance(half_angle_deg=80.0)
-        range_clearance = self._lidar_processor.get_range_clearance()
+        # left_w, right_w = self._lidar_processor.get_overtake_widths()
+        # lidar_clearance = self._lidar_processor.get_forward_clearance(half_angle_deg=80.0)
+        # range_clearance = self._lidar_processor.get_range_clearance()
 
         if self._start_time is None:
             self._start_time = now_sec
@@ -1029,10 +1029,14 @@ class MPCController(Node):
             forward_vehicle_distance=fwd_dist,
             forward_vehicle_speed=fwd_speed,
             forward_vehicle_heading_diff=fwd_heading_diff,
-            overtake_width_left=left_w,
-            overtake_width_right=right_w,
-            lidar_forward_clearance=lidar_clearance,
-            lidar_range_clearance=range_clearance,
+            # overtake_width_left=left_w,
+            # overtake_width_right=right_w,
+            # lidar_forward_clearance=lidar_clearance,
+            # lidar_range_clearance=range_clearance,
+            overtake_width_left=0.0,
+            overtake_width_right=0.0,
+            lidar_forward_clearance=None,
+            lidar_range_clearance=None,
             time_stopped_sec=time_stopped,
             is_in_recovery_cooldown=is_cooldown,
         )

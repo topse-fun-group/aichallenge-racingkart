@@ -98,8 +98,8 @@ def _get_effective_forward_distance(ctx: StateContext) -> Optional[float]:
     if ctx.forward_vehicle_distance is not None:
         dists.append(ctx.forward_vehicle_distance)
     # Gated LiDAR: Consider LiDAR if obstacle is within 5.0m radius to guarantee collision prevention
-    if ctx.lidar_forward_clearance is not None and ctx.lidar_forward_clearance <= 5.0:
-        dists.append(ctx.lidar_forward_clearance)
+    # if ctx.lidar_forward_clearance is not None and ctx.lidar_forward_clearance <= 5.0:
+    #     dists.append(ctx.lidar_forward_clearance)
     return min(dists) if dists else None
 
 
@@ -385,10 +385,11 @@ class FollowState(DrivingState):
 
         # Check if clearance is completely clear ahead (no V2X leader AND no LiDAR obstacle within 5m)
         has_v2x_leader = (ctx.forward_vehicle_distance is not None and ctx.forward_vehicle_distance < self.VEHICLE_DETECT_DISTANCE)
-        has_lidar_close_obstacle = (ctx.lidar_forward_clearance is not None and ctx.lidar_forward_clearance < 5.0)
+        # has_lidar_close_obstacle = (ctx.lidar_forward_clearance is not None and ctx.lidar_forward_clearance < 5.0)
 
         # 1.5s Hysteresis: Only return to follow_path if path remains clear for >= 1.5s continuously
-        is_forward_clear = (not has_v2x_leader and not has_lidar_close_obstacle)
+        # is_forward_clear = (not has_v2x_leader and not has_lidar_close_obstacle)
+        is_forward_clear = not has_v2x_leader
         if is_forward_clear:
             if self._clear_start_time is None:
                 self._clear_start_time = ctx.current_time_sec
