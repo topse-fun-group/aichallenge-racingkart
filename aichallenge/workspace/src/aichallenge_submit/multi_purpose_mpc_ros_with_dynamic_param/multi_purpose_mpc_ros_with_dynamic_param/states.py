@@ -81,11 +81,14 @@ class StateContext:
     forward_vehicle_speed: Optional[float] = None       # [m/s]
     forward_vehicle_heading_diff: float = 0.0          # absolute heading diff relative to path_psi [rad]
 
-    # --- LiDAR (Phase 2) ----------------------------------------------------
-    overtake_width_left: float = 0.0   # available width on left [m]
-    overtake_width_right: float = 0.0  # available width on right [m]
-    lidar_forward_clearance: Optional[float] = None   # [m] from LiDAR forward cone
-    lidar_range_clearance: Optional[float] = None     # [m] from LiDAR full range
+    # --- ReferencePath Clearance & Overtake ----------------------------------
+    overtake_width_left: float = 0.0      # available width on left [m]
+    overtake_width_right: float = 0.0     # available width on right [m]
+    target_overtake_offset: float = 0.0   # dynamic lateral offset [m] for centerline of free space
+    has_side_vehicle: bool = False        # True if another vehicle is alongside (-2.5m <= x_rel <= 2.5m)
+    side_vehicle_speed: Optional[float] = None  # speed of side vehicle [m/s]
+    lidar_forward_clearance: Optional[float] = None   # retained for compatibility
+    lidar_range_clearance: Optional[float] = None
 
     # --- Stuck detection ----------------------------------------------------
     time_stopped_sec: float = 0.0  # duration velocity ≈ 0 [s]
@@ -93,14 +96,8 @@ class StateContext:
 
 
 def _get_effective_forward_distance(ctx: StateContext) -> Optional[float]:
-    """Get the effective forward distance combining V2X and close-proximity LiDAR (<= 5.0m)."""
-    dists = []
-    if ctx.forward_vehicle_distance is not None:
-        dists.append(ctx.forward_vehicle_distance)
-    # Gated LiDAR: Consider LiDAR if obstacle is within 5.0m radius to guarantee collision prevention
-    # if ctx.lidar_forward_clearance is not None and ctx.lidar_forward_clearance <= 5.0:
-    #     dists.append(ctx.lidar_forward_clearance)
-    return min(dists) if dists else None
+    """Get the forward vehicle distance from V2X tracker."""
+    return ctx.forward_vehicle_distance
 
 
 # ---------------------------------------------------------------------------
@@ -175,8 +172,8 @@ class FollowPathState(DrivingState):
     QN = [1_000_000.0, 1_000.0, 10_000.0]
 
     # ---- forward-vehicle detection thresholds -------------------------------
-    VEHICLE_DETECT_DISTANCE = 15.0   # [m]
-    VEHICLE_WIDTH_WITH_MARGIN = 2.30 # vehicle width + safety margin [m]
+    VEHICLE_DETECT_DISTANCE = 8.0   # [m]
+    MIN_OVERTAKE_WIDTH = 1.4         # minimum available width to execute overtake [m]
 
     @property
     def name(self) -> str:
@@ -206,17 +203,20 @@ class FollowPathState(DrivingState):
                 and ctx.velocity < STUCK_VELOCITY_THRESHOLD):
             return "recovery"
 
-        # Phase 2: forward-vehicle / obstacle detection (V2X + LiDAR fusion)
+        # Phase 2: forward / side vehicle detection (V2X)
         eff_dist = _get_effective_forward_distance(ctx)
-        if eff_dist is not None and eff_dist < self.VEHICLE_DETECT_DISTANCE:
-            max_side = max(ctx.overtake_width_left, ctx.overtake_width_right)
-            has_clearance = max_side > self.VEHICLE_WIDTH_WITH_MARGIN
-            is_zero_speed = (ctx.forward_vehicle_speed is not None and ctx.forward_vehicle_speed < 0.3)
-            is_aligned = (ctx.forward_vehicle_heading_diff <= np.deg2rad(45.0))
+        has_forward_vehicle = (eff_dist is not None and eff_dist < self.VEHICLE_DETECT_DISTANCE)
+        has_any_obstacle = has_forward_vehicle or ctx.has_side_vehicle
 
-            # (1) Overtake if clearance exists AND (leader is stopped OR leader heading is NOT aligned with path)
+        if has_any_obstacle:
+            max_side = max(ctx.overtake_width_left, ctx.overtake_width_right)
+            has_clearance = max_side >= self.MIN_OVERTAKE_WIDTH
+            is_zero_speed = (ctx.forward_vehicle_speed is not None and ctx.forward_vehicle_speed < 0.3)
+            is_not_aligned = (ctx.forward_vehicle_heading_diff > np.deg2rad(45.0))
+
+            # (1) Overtake if clearance exists AND (leader is stopped OR leader heading is NOT aligned OR side-by-side)
             # (2) Follow if no clearance OR leader is aligned and moving
-            if has_clearance and (is_zero_speed or not is_aligned):
+            if has_clearance and (is_zero_speed or is_not_aligned or ctx.has_side_vehicle):
                 return "overtake"
             else:
                 return "follow"
@@ -235,12 +235,12 @@ class RecoveryState(DrivingState):
     3. Transition to ``follow_path``.
     """
 
-    WAIT_DURATION = 2.0          # [s] (停止待機)
-    BACK_SPEED = -2.5            # [m/s] (後退速度)
-    BACK_ACCEL = 2.5             # [m/s^2] (正の絶対値でスロットルを要求)
+    WAIT_DURATION = 1.0          # [s] (停止待機)
+    BACK_SPEED = -3.5            # [m/s] (後退速度)
+    BACK_ACCEL = 3.0             # [m/s^2] (正の絶対値でスロットルを要求)
     MIN_BACK_DURATION = 1.5      # [s] (最低1.5秒はバックを継続してチャタリング防止)
     MAX_BACK_DURATION = 3.5      # [s] (最大バック時間)
-    PATH_DEVIATION_THRESHOLD = 2.0  # [m] — threshold to rejoin
+    PATH_DEVIATION_THRESHOLD = 1.0  # [m] — threshold to rejoin
 
     def __init__(self) -> None:
         self._enter_time: Optional[float] = None
@@ -357,7 +357,7 @@ class FollowState(DrivingState):
     QN = [1_000_000.0, 1_000.0, 10_000.0]
 
     VEHICLE_DETECT_DISTANCE = 12.0
-    VEHICLE_WIDTH_WITH_MARGIN = 2.80
+    MIN_OVERTAKE_WIDTH = 1.6  # minimum available width to execute overtake [m]
 
     CLEAR_HYSTERESIS_SEC = 1.5  # Must remain clear for 1.5 seconds continuously before returning to follow_path
 
@@ -383,13 +383,10 @@ class FollowState(DrivingState):
 
         eff_dist = _get_effective_forward_distance(ctx)
 
-        # Check if clearance is completely clear ahead (no V2X leader AND no LiDAR obstacle within 5m)
-        has_v2x_leader = (ctx.forward_vehicle_distance is not None and ctx.forward_vehicle_distance < self.VEHICLE_DETECT_DISTANCE)
-        # has_lidar_close_obstacle = (ctx.lidar_forward_clearance is not None and ctx.lidar_forward_clearance < 5.0)
-
         # 1.5s Hysteresis: Only return to follow_path if path remains clear for >= 1.5s continuously
-        # is_forward_clear = (not has_v2x_leader and not has_lidar_close_obstacle)
-        is_forward_clear = not has_v2x_leader
+        has_v2x_leader = (ctx.forward_vehicle_distance is not None and ctx.forward_vehicle_distance < self.VEHICLE_DETECT_DISTANCE)
+        has_any_obstacle = (has_v2x_leader or ctx.has_side_vehicle)
+        is_forward_clear = not has_any_obstacle
         if is_forward_clear:
             if self._clear_start_time is None:
                 self._clear_start_time = ctx.current_time_sec
@@ -398,15 +395,15 @@ class FollowState(DrivingState):
                 self._clear_start_time = None
                 return "follow_path"
         else:
-            self._clear_start_time = None  # Instantly reset timer if vehicle/obstacle is detected
+            self._clear_start_time = None  # Instantly reset timer if vehicle is detected
 
         max_side = max(ctx.overtake_width_left, ctx.overtake_width_right)
-        has_clearance = max_side > self.VEHICLE_WIDTH_WITH_MARGIN
+        has_clearance = max_side >= self.MIN_OVERTAKE_WIDTH
         is_zero_speed = (ctx.forward_vehicle_speed is not None and ctx.forward_vehicle_speed < 0.3)
-        is_aligned = (ctx.forward_vehicle_heading_diff <= np.deg2rad(45.0))
+        is_not_aligned = (ctx.forward_vehicle_heading_diff > np.deg2rad(45.0))
 
-        # Switch to Overtake if clearance exists AND (leader is stopped OR leader heading is NOT aligned)
-        if has_clearance and (is_zero_speed or not is_aligned):
+        # Switch to Overtake if clearance exists AND (leader is stopped OR leader heading is NOT aligned OR side-by-side)
+        if has_clearance and (is_zero_speed or is_not_aligned or ctx.has_side_vehicle):
             return "overtake"
 
         # Stuck detection: ONLY trigger Recovery if NOT intentionally waiting behind a leader/obstacle
@@ -422,7 +419,14 @@ class FollowState(DrivingState):
     # -- dynamic v_max -------------------------------------------------------
 
     def get_adjusted_v_max_kmh(self, ctx: StateContext) -> float:
-        """Compute dynamic v_max [km/h] with strict distance governor to maintain 8m relative distance."""
+        """Compute dynamic v_max [km/h] with strict distance governor and side-vehicle yielding."""
+        # If a side-vehicle is alongside and clearance is insufficient, yield by reducing speed
+        max_side = max(ctx.overtake_width_left, ctx.overtake_width_right)
+        if ctx.has_side_vehicle and max_side < self.MIN_OVERTAKE_WIDTH:
+            side_speed = ctx.side_vehicle_speed if ctx.side_vehicle_speed is not None else 5.0
+            target_mps = max(0.0, side_speed - 1.5)  # Yield by slowing down 1.5 m/s to open longitudinal gap
+            return float(np.clip(target_mps * 3.6, 0.0, self._V_MAX_DEFAULT))
+
         eff_dist = _get_effective_forward_distance(ctx)
         if eff_dist is None:
             return self._V_MAX_DEFAULT
@@ -462,7 +466,7 @@ class OvertakeState(DrivingState):
     def __init__(self) -> None:
         self._overtake_side: str = "left"  # "left" or "right"
         self._enter_time: Optional[float] = None
-        self._calculated_offset: float = 2.5
+        self._calculated_offset: float = 1.8
 
     @property
     def name(self) -> str:
@@ -480,8 +484,11 @@ class OvertakeState(DrivingState):
 
     def on_enter(self, ctx: StateContext) -> None:
         self._enter_time = ctx.current_time_sec
-        # 空きスペースの中央 (幅 / 2.0) を通る動的オフセット算出
-        if ctx.overtake_width_left >= ctx.overtake_width_right:
+        # ReferencePath から計算された空き領域の真ん中を通る動的オフセットを採用
+        if abs(ctx.target_overtake_offset) > 0.1:
+            self._calculated_offset = ctx.target_overtake_offset
+            self._overtake_side = "left" if ctx.target_overtake_offset > 0 else "right"
+        elif ctx.overtake_width_left >= ctx.overtake_width_right:
             self._overtake_side = "left"
             half_w = ctx.overtake_width_left / 2.0
             self._calculated_offset = float(np.clip(half_w, 1.2, 2.2))

@@ -58,7 +58,13 @@ from multi_purpose_mpc_ros_msgs.msg import AckermannControlBoostCommand, PathCon
 from multi_purpose_mpc_ros_with_dynamic_param.tools.reference_velocity_configulator import ReferenceVelocityConfigulator
 
 # State machine
-from multi_purpose_mpc_ros_with_dynamic_param.states import StateContext, MPCStateParams, FollowState, ControlMode
+from multi_purpose_mpc_ros_with_dynamic_param.states import (
+    StateContext,
+    MPCStateParams,
+    FollowState,
+    OvertakeState,
+    ControlMode,
+)
 from multi_purpose_mpc_ros_with_dynamic_param.state_manager import StateManager
 # from multi_purpose_mpc_ros_with_dynamic_param.lidar_processor import LidarProcessor
 
@@ -902,8 +908,10 @@ class MPCController(Node):
         dists_sq = np.einsum("ij,ij->i", diffs, diffs)
         return float(np.sqrt(np.min(dists_sq)))
 
-    def _detect_forward_vehicle(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-        """Return (distance, speed, heading_rad) of the nearest V2X vehicle directly in front in the same lane."""
+    def _detect_forward_and_side_vehicles(
+        self
+    ) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[Tuple[float, float]], bool, Optional[float]]:
+        """Return (fwd_dist, fwd_speed, fwd_heading, fwd_pos, has_side_vehicle, side_speed)."""
         HALF_ANGLE = np.deg2rad(45.0)      # ±45 deg forward cone to maintain tracking throughout turns
         MAX_DIST = 15.0                    # 15m max forward detection distance
         MAX_LATERAL_DIFF = 3.5             # Lateral tolerance [m] covering full track width
@@ -912,6 +920,11 @@ class MPCController(Node):
         best_dist: Optional[float] = None
         best_speed: Optional[float] = None
         best_heading: Optional[float] = None
+        best_pos: Optional[Tuple[float, float]] = None
+
+        has_side_vehicle = False
+        side_vehicle_speed: Optional[float] = None
+        side_vehicle_pos: Optional[Tuple[float, float]] = None
 
         cos_t = np.cos(pose.theta)
         sin_t = np.sin(pose.theta)
@@ -931,11 +944,19 @@ class MPCController(Node):
             x_rel = cos_t * dx + sin_t * dy
             y_rel = -sin_t * dx + cos_t * dy
 
-            # Must be ahead in longitudinal direction (any distance ahead > 0.0m)
+            vx_vel, vy_vel = self._v2x_tracker.velocity(vid)
+            v_speed = float(np.hypot(vx_vel, vy_vel))
+
+            # 1. Side-by-side vehicle detection (-2.5m <= x_rel <= 2.5m, alongside on track)
+            if -2.5 <= x_rel <= 2.5 and 0.6 <= abs(y_rel) <= MAX_LATERAL_DIFF:
+                has_side_vehicle = True
+                side_vehicle_speed = v_speed
+                side_vehicle_pos = (vx_pos, vy_pos)
+
+            # 2. Forward vehicle detection (ahead in longitudinal direction)
             if x_rel <= 0.0 or x_rel > MAX_DIST:
                 continue
 
-            # Must be in the same track corridor laterally
             if abs(y_rel) > MAX_LATERAL_DIFF:
                 continue
 
@@ -947,8 +968,8 @@ class MPCController(Node):
             dist = float(np.hypot(dx, dy))
             if best_dist is None or dist < best_dist:
                 best_dist = dist
-                vx_vel, vy_vel = self._v2x_tracker.velocity(vid)
-                best_speed = float(np.hypot(vx_vel, vy_vel))
+                best_pos = (vx_pos, vy_pos)
+                best_speed = v_speed
                 if best_speed > 0.3:
                     best_heading = float(np.arctan2(vy_vel, vx_vel))
                 elif len(buf) >= 2:
@@ -957,7 +978,62 @@ class MPCController(Node):
                     if np.hypot(dx_v, dy_v) > 0.05:
                         best_heading = float(np.arctan2(dy_v, dx_v))
 
-        return best_dist, best_speed, best_heading
+        # If no vehicle directly ahead but a vehicle is alongside, use side vehicle pos for corridor calc
+        target_corridor_pos = best_pos if best_pos is not None else side_vehicle_pos
+        return best_dist, best_speed, best_heading, target_corridor_pos, has_side_vehicle, side_vehicle_speed
+
+    def _compute_v2x_overtake_corridor(
+        self, fwd_pos: Optional[Tuple[float, float]]
+    ) -> Tuple[float, float, float]:
+        """Compute available road widths (left, right) and optimal target overtake offset using ReferencePath.
+
+        Returns
+        -------
+        (overtake_width_left, overtake_width_right, target_overtake_offset)
+        """
+        if fwd_pos is None or self._waypoint_xy is None or len(self._waypoint_xy) == 0:
+            return 0.0, 0.0, 0.0
+
+        vx, vy = fwd_pos
+        fwd_xy = np.array([vx, vy], dtype=np.float64)
+        diffs = self._waypoint_xy - fwd_xy
+        dists_sq = np.einsum("ij,ij->i", diffs, diffs)
+        closest_idx = int(np.argmin(dists_sq))
+        wp = self._reference_path.waypoints[closest_idx]
+
+        # Waypoint bounds (left is positive, right is negative)
+        ub = float(wp.ub) if wp.ub is not None else 3.0
+        lb = float(wp.lb) if wp.lb is not None else -3.0
+
+        # Leader lateral position e_y relative to waypoint centerline
+        path_psi = float(wp.psi)
+        dx = vx - wp.x
+        dy = vy - wp.y
+        e_y_leader = float(-dx * np.sin(path_psi) + dy * np.cos(path_psi))
+
+        # Margins: vehicle half-width + clearance
+        W_MARGIN = 0.9   # vehicle half-width (0.725m) + safety margin
+        W_WALL = 0.6     # course wall buffer
+
+        # Available widths on left and right
+        left_edge = ub - W_WALL
+        left_obstacle_inner = e_y_leader + W_MARGIN
+        avail_left = max(0.0, left_edge - left_obstacle_inner)
+
+        right_edge = lb + W_WALL
+        right_obstacle_inner = e_y_leader - W_MARGIN
+        avail_right = max(0.0, right_obstacle_inner - right_edge)
+
+        # Target centerlines for the corridors
+        offset_left = (left_obstacle_inner + left_edge) / 2.0
+        offset_right = (right_edge + right_obstacle_inner) / 2.0
+
+        if avail_left >= avail_right:
+            target_offset = float(np.clip(offset_left, 0.8, 2.5))
+        else:
+            target_offset = float(np.clip(offset_right, -2.5, -0.8))
+
+        return float(avail_left), float(avail_right), float(target_offset)
 
     def _build_state_context(self, dt: float, is_colliding: bool) -> StateContext:
         """Assemble a StateContext snapshot for the current tick."""
@@ -981,10 +1057,8 @@ class MPCController(Node):
             self._stopped_since = None
             time_stopped = 0.0
 
-        fwd_dist, fwd_speed, fwd_heading = self._detect_forward_vehicle()
-        # left_w, right_w = self._lidar_processor.get_overtake_widths()
-        # lidar_clearance = self._lidar_processor.get_forward_clearance(half_angle_deg=80.0)
-        # range_clearance = self._lidar_processor.get_range_clearance()
+        fwd_dist, fwd_speed, fwd_heading, corridor_pos, has_side, side_speed = self._detect_forward_and_side_vehicles()
+        left_w, right_w, target_offset = self._compute_v2x_overtake_corridor(corridor_pos)
 
         if self._start_time is None:
             self._start_time = now_sec
@@ -1029,12 +1103,11 @@ class MPCController(Node):
             forward_vehicle_distance=fwd_dist,
             forward_vehicle_speed=fwd_speed,
             forward_vehicle_heading_diff=fwd_heading_diff,
-            # overtake_width_left=left_w,
-            # overtake_width_right=right_w,
-            # lidar_forward_clearance=lidar_clearance,
-            # lidar_range_clearance=range_clearance,
-            overtake_width_left=0.0,
-            overtake_width_right=0.0,
+            overtake_width_left=left_w,
+            overtake_width_right=right_w,
+            target_overtake_offset=target_offset,
+            has_side_vehicle=has_side,
+            side_vehicle_speed=side_speed,
             lidar_forward_clearance=None,
             lidar_range_clearance=None,
             time_stopped_sec=time_stopped,
@@ -1125,6 +1198,8 @@ class MPCController(Node):
             if new_params is not None:
                 self._apply_state_params(new_params)
 
+            current_state = self._state_manager.current_state
+
             if prev_state_name == "recovery" and self._state_manager.current_state_name != "recovery":
                 self._last_recovery_exit_time = (now.nanoseconds / 1e9)
                 # Instantly reset last control memory to forward motion for zero-lag launch
@@ -1132,8 +1207,8 @@ class MPCController(Node):
                 self._last_acc = 1.0
                 self.get_logger().info("Exited RecoveryState: instant launch & recovery cooldown started")
 
-            # Smoothly interpolate lateral offset towards target_offset (tapering for smooth lane change & return)
-            rate = 0.08
+            # Smoothly interpolate lateral offset: fast rate (0.22) for agile avoidance in OvertakeState, smooth (0.08) for return
+            rate = 0.22 if isinstance(current_state, OvertakeState) else 0.08
             self._current_lateral_offset += (self._target_lateral_offset - self._current_lateral_offset) * rate
 
             offset = self._current_lateral_offset
@@ -1142,7 +1217,6 @@ class MPCController(Node):
             self._car.update_states(x_shifted, y_shifted, pose.theta)
 
             # Follow state: dynamically adjust v_max to match leader speed
-            current_state = self._state_manager.current_state
             if isinstance(current_state, FollowState):
                 dynamic_v_max = current_state.get_adjusted_v_max_kmh(ctx)
                 v_max_mps = kmh_to_m_per_sec(dynamic_v_max)
@@ -1235,9 +1309,10 @@ class MPCController(Node):
             if isinstance(current_state, FollowState):
                 acc = np.clip(acc, self._mpc_cfg.a_min, 1.0)  # max 1.0 m/s² (half of a_max)
 
-            # apply low pass filter to control signal
+            # Apply low pass filter to control signal (agile high gain 0.85 during OvertakeState for quick avoidance)
+            steer_gain = 0.85 if isinstance(current_state, OvertakeState) else self._mpc_cfg.steer_low_pass_gain
             acc = self._last_acc + (acc - self._last_acc) * self._mpc_cfg.accel_low_pass_gain
-            u[1] = self._last_u[1] + (u[1] - self._last_u[1]) * self._mpc_cfg.steer_low_pass_gain
+            u[1] = self._last_u[1] + (u[1] - self._last_u[1]) * steer_gain
 
             self._last_acc = acc
             self._last_u[0] = u[0]

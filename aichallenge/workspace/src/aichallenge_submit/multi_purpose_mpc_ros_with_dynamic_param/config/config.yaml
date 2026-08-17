@@ -39,7 +39,7 @@ bicycle_model:
   width: 2.30   # +safety margin
 
 mpc:
-  N: 20
+  N: 15
   # Q: [e_y, e_psi, t]
   # R: [v, delta]
   # QN: [e_y, e_psi, t]
