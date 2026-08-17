@@ -42,6 +42,8 @@ install(PROGRAMS
   scripts/publish_initialpose_gnss
   scripts/reference_path_visualizer
   scripts/reference_velocity_configulator
+  scripts/analyze_trajectory.py
+  scripts/run_analyze_trajectory.bash
   DESTINATION lib/${PROJECT_NAME}
 )
 

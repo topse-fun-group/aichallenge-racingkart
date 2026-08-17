@@ -1,0 +1,1779 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MPC 制御構造 & パラメータ・OSQP詳細設計 完全ガイド | AI Challenge Racing Kart</title>
+
+  <!-- Google Fonts & KaTeX CDN & FontAwesome & Mermaid.js -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600&family=Inter:wght@300;400;600;700;800&family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {
+    delimiters: [
+      {left: '$$', right: '$$', display: true},
+      {left: '$', right: '$', display: false},
+      {left: '\\(', right: '\\)', display: false},
+      {left: '\\[', right: '\\]', display: true}
+    ],
+    throwOnError: false
+  });"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+  <style>
+    :root {
+      --bg-dark: #090d16;
+      --bg-card: #111827;
+      --bg-card-hover: #1f293d;
+      --bg-glass: rgba(17, 24, 39, 0.75);
+      --border-color: rgba(255, 255, 255, 0.1);
+      --primary: #00f2fe;
+      --primary-glow: rgba(0, 242, 254, 0.3);
+      --secondary: #4facfe;
+      --accent: #43e97b;
+      --accent-warm: #fa709a;
+      --warning: #ffb703;
+      --danger: #ef4444;
+      --text-main: #f3f4f6;
+      --text-muted: #9ca3af;
+      --code-bg: #050811;
+      --sidebar-width: 290px;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background-color: var(--bg-dark);
+      color: var(--text-main);
+      line-height: 1.6;
+      display: flex;
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* Sidebar Navigation */
+    .sidebar {
+      width: var(--sidebar-width);
+      background: rgba(9, 13, 22, 0.95);
+      backdrop-filter: blur(12px);
+      border-right: 1px solid var(--border-color);
+      position: fixed;
+      top: 0;
+      bottom: 0;
+      left: 0;
+      z-index: 100;
+      display: flex;
+      flex-direction: column;
+      padding: 1.5rem 0.8rem;
+      overflow-y: auto;
+    }
+
+    .sidebar-header {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding-bottom: 1.5rem;
+      padding-left: 0.5rem;
+      border-bottom: 1px solid var(--border-color);
+      margin-bottom: 1.2rem;
+    }
+
+    .sidebar-header i {
+      font-size: 1.8rem;
+      color: var(--primary);
+      filter: drop-shadow(0 0 8px var(--primary-glow));
+    }
+
+    .sidebar-header h2 {
+      font-family: 'Outfit', sans-serif;
+      font-size: 1.1rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #00f2fe 0%, #4facfe 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      line-height: 1.2;
+    }
+
+    .nav-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+    }
+
+    .nav-item a {
+      display: flex;
+      align-items: center;
+      gap: 0.65rem;
+      padding: 0.6rem 0.75rem;
+      color: var(--text-muted);
+      text-decoration: none;
+      border-radius: 8px;
+      font-size: 0.84rem;
+      font-weight: 500;
+      transition: all 0.2s ease;
+    }
+
+    .nav-item a:hover, .nav-item a.active {
+      color: #fff;
+      background: rgba(0, 242, 254, 0.1);
+      border-left: 3px solid var(--primary);
+    }
+
+    .nav-item a i {
+      width: 18px;
+      text-align: center;
+    }
+
+    /* Main Layout */
+    .main-content {
+      margin-left: var(--sidebar-width);
+      flex: 1;
+      padding: 2.5rem 3rem;
+      max-width: 1450px;
+    }
+
+    /* Hero Banner */
+    .hero-banner {
+      background: linear-gradient(135deg, rgba(0, 242, 254, 0.12) 0%, rgba(79, 172, 254, 0.05) 50%, rgba(17, 24, 39, 0.8) 100%);
+      border: 1px solid rgba(0, 242, 254, 0.25);
+      border-radius: 16px;
+      padding: 2.5rem;
+      margin-bottom: 3rem;
+      position: relative;
+      overflow: hidden;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    }
+
+    .hero-banner::before {
+      content: '';
+      position: absolute;
+      top: -50%;
+      right: -20%;
+      width: 400px;
+      height: 400px;
+      background: radial-gradient(circle, var(--primary-glow) 0%, transparent 70%);
+      pointer-events: none;
+    }
+
+    .badge-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      background: rgba(0, 242, 254, 0.15);
+      color: var(--primary);
+      border: 1px solid rgba(0, 242, 254, 0.3);
+      padding: 0.3rem 0.8rem;
+      border-radius: 20px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      margin-bottom: 1rem;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .hero-title {
+      font-family: 'Outfit', sans-serif;
+      font-size: 2.4rem;
+      font-weight: 800;
+      line-height: 1.25;
+      margin-bottom: 1rem;
+      background: linear-gradient(135deg, #ffffff 0%, #e2e8f0 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .hero-desc {
+      color: var(--text-muted);
+      font-size: 1.05rem;
+      max-width: 900px;
+    }
+
+    /* Section Styling */
+    .section-block {
+      margin-bottom: 4rem;
+      scroll-margin-top: 2rem;
+    }
+
+    .section-title {
+      font-family: 'Outfit', sans-serif;
+      font-size: 1.75rem;
+      font-weight: 700;
+      margin-bottom: 1.25rem;
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      border-bottom: 2px solid var(--border-color);
+      padding-bottom: 0.75rem;
+    }
+
+    .section-title i {
+      color: var(--primary);
+    }
+
+    .sub-section-title {
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: var(--secondary);
+      margin-top: 2rem;
+      margin-bottom: 1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    /* Cards & Grid Layout */
+    .card-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 1.5rem;
+      margin-top: 1.5rem;
+    }
+
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 1.5rem;
+      transition: all 0.3s ease;
+      position: relative;
+    }
+
+    .card:hover {
+      border-color: rgba(0, 242, 254, 0.4);
+      transform: translateY(-3px);
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
+    }
+
+    .card-title {
+      font-size: 1.1rem;
+      font-weight: 600;
+      margin-bottom: 0.75rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      color: var(--primary);
+    }
+
+    /* GitHub Alert Box */
+    .alert-box {
+      border-left: 4px solid var(--primary);
+      background: rgba(0, 242, 254, 0.06);
+      padding: 1.2rem;
+      border-radius: 0 8px 8px 0;
+      margin: 1.5rem 0;
+    }
+    .alert-box.tip { border-color: var(--accent); background: rgba(67, 233, 123, 0.06); }
+    .alert-box.warning { border-color: var(--warning); background: rgba(255, 183, 3, 0.06); }
+    .alert-title { font-weight: 700; margin-bottom: 0.3rem; display: flex; align-items: center; gap: 0.5rem; }
+
+    /* Tables */
+    .custom-table-container {
+      overflow-x: auto;
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      margin-top: 1.25rem;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+      font-size: 0.88rem;
+    }
+
+    th {
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--primary);
+      padding: 0.9rem 1.1rem;
+      font-weight: 600;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    td {
+      padding: 0.85rem 1.1rem;
+      border-bottom: 1px solid var(--border-color);
+      color: var(--text-main);
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    tr:hover td {
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    code {
+      font-family: 'Fira Code', monospace;
+      background: rgba(0, 242, 254, 0.1);
+      color: var(--primary);
+      padding: 0.15rem 0.4rem;
+      border-radius: 4px;
+      font-size: 0.85em;
+    }
+
+    pre code {
+      background: transparent;
+      color: #e2e8f0;
+      padding: 0;
+    }
+
+    .code-block {
+      background: var(--code-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 10px;
+      padding: 1.25rem;
+      overflow-x: auto;
+      font-family: 'Fira Code', monospace;
+      font-size: 0.84rem;
+      margin: 1rem 0;
+      line-height: 1.55;
+    }
+
+    /* Enhanced Mermaid Container with High Readability & Large Font */
+    .mermaid-box {
+      background: #050811;
+      border: 1px solid rgba(0, 242, 254, 0.3);
+      border-radius: 12px;
+      padding: 2rem;
+      margin: 1.25rem 0;
+      overflow-x: auto;
+      min-height: 460px;
+      box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.8);
+    }
+
+    .mermaid svg {
+      font-size: 16px !important;
+      font-family: 'Inter', 'Fira Code', sans-serif !important;
+      width: 100% !important;
+      min-width: 850px;
+      height: auto !important;
+    }
+
+    /* Interactive Simulator */
+    .sim-container {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 16px;
+      padding: 1.5rem;
+      display: grid;
+      grid-template-columns: 1fr 340px;
+      gap: 1.5rem;
+      margin-top: 1.5rem;
+    }
+
+    @media (max-width: 1024px) {
+      .sim-container {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .sim-canvas-wrapper {
+      position: relative;
+      background: #050811;
+      border-radius: 12px;
+      border: 1px solid var(--border-color);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: 440px;
+      background: #050811;
+    }
+
+    .sim-controls {
+      display: flex;
+      flex-direction: column;
+      gap: 1.2rem;
+      background: rgba(255, 255, 255, 0.02);
+      padding: 1.25rem;
+      border-radius: 12px;
+      border: 1px solid var(--border-color);
+    }
+
+    .control-group {
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+    }
+
+    .control-group label {
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .control-group label span.val {
+      color: var(--primary);
+      font-family: 'Fira Code', monospace;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--primary);
+      cursor: pointer;
+    }
+
+    .btn-action {
+      background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
+      color: #000;
+      border: none;
+      padding: 0.75rem 1.2rem;
+      border-radius: 8px;
+      font-weight: 700;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      transition: all 0.2s;
+    }
+
+    .btn-action:hover {
+      opacity: 0.9;
+      transform: scale(1.02);
+    }
+
+    /* Math Box */
+    .math-card {
+      background: rgba(17, 24, 39, 0.9);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-top: 1rem;
+    }
+
+    /* Tree View */
+    .tree-view {
+      font-family: 'Fira Code', monospace;
+      font-size: 0.88rem;
+      line-height: 1.7;
+    }
+
+    .tree-item {
+      padding-left: 1.2rem;
+      position: relative;
+    }
+
+    .tree-item::before {
+      content: '├─';
+      position: absolute;
+      left: 0;
+      color: var(--text-muted);
+    }
+
+    .tree-item.last::before {
+      content: '└─';
+    }
+
+    .tree-dir {
+      color: var(--secondary);
+      font-weight: 600;
+    }
+
+    .tree-file {
+      color: var(--text-main);
+    }
+
+    .tree-comment {
+      color: var(--text-muted);
+      font-size: 0.8em;
+      margin-left: 0.8rem;
+    }
+
+    .tag-func {
+      background: rgba(67, 233, 123, 0.15);
+      color: var(--accent);
+      padding: 0.1rem 0.4rem;
+      border-radius: 4px;
+      font-family: 'Fira Code', monospace;
+      font-size: 0.82rem;
+      font-weight: 600;
+    }
+
+    .tag-class {
+      background: rgba(79, 172, 254, 0.15);
+      color: var(--secondary);
+      padding: 0.1rem 0.4rem;
+      border-radius: 4px;
+      font-family: 'Fira Code', monospace;
+      font-size: 0.82rem;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Sidebar Nav -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <i class="fa-solid fa-gauge-high"></i>
+      <div>
+        <h2>MPC Racing Guide</h2>
+        <span style="font-size: 0.72rem; color: var(--text-muted);">AI Challenge Racing Kart</span>
+      </div>
+    </div>
+    <ul class="nav-list">
+      <li class="nav-item"><a href="#overview" class="active"><i class="fa-solid fa-flag-checkered"></i>1. MPC概要 & 比較</a></li>
+      <li class="nav-item"><a href="#architecture"><i class="fa-solid fa-sitemap"></i>2. ファイル構造 & ROS2</a></li>
+      <li class="nav-item"><a href="#struct-design"><i class="fa-solid fa-diagram-project"></i>3. 全体構造設計 (高解像度図解)</a></li>
+      <li class="nav-item"><a href="#sw-design"><i class="fa-solid fa-code-branch"></i>4. 詳細ソフトウェア設計 (関数・変数)</a></li>
+      <li class="nav-item"><a href="#osqp-overview"><i class="fa-solid fa-box-open"></i>5. OSQP 概要 & 直感イメージ</a></li>
+      <li class="nav-item"><a href="#osqp-algorithm"><i class="fa-solid fa-square-root-variable"></i>6. OSQP 理論・数値サンプル例</a></li>
+      <li class="nav-item"><a href="#osqp-matrix"><i class="fa-solid fa-cubes"></i>7. OSQP 行列構築 & diag解説</a></li>
+      <li class="nav-item"><a href="#theory"><i class="fa-solid fa-calculator"></i>8. 空間運動モデル (Spatial)</a></li>
+      <li class="nav-item"><a href="#parameters"><i class="fa-solid fa-sliders"></i>9. パラメータ完全解説</a></li>
+      <li class="nav-item"><a href="#interactive-sim"><i class="fa-solid fa-gamepad"></i>10. 動的周回シミュレータ</a></li>
+      <li class="nav-item"><a href="#geometric-fan"><i class="fa-solid fa-compass-drafting"></i>10-2. 幾何学的選択肢アニメーション</a></li>
+      <li class="nav-item"><a href="#tuning-guide"><i class="fa-solid fa-rocket"></i>11. 高速走行化ステップ</a></li>
+      <li class="nav-item"><a href="#future-roadmap"><i class="fa-solid fa-compass"></i>12. 今後の開発アドバイス</a></li>
+    </ul>
+  </aside>
+
+  <!-- Main Content -->
+  <main class="main-content">
+
+    <!-- Hero Header -->
+    <header class="hero-banner">
+      <div class="badge-tag"><i class="fa-solid fa-microchip"></i> Control Engineering & Software Architecture</div>
+      <h1 class="hero-title">MPC (Model Predictive Control) ＆ OSQP アルゴリズム完全設計ガイド</h1>
+      <p class="hero-desc">
+        本ドキュメントは <code>aichallenge-racingkart</code> の <code>multi_purpose_mpc_ros</code> パッケージに関する機能概要・パラメータ・空間運動モデル・<b>大判データフロー/シーケンス図による構造設計</b>・<b>関数/変数レベルの詳細設計</b>・<b>OSQPの概要・ライセンス・直感イメージと数値計算サンプル例</b>・<b>diag対角関数の詳細解説</b>・<b>MPC候補軌跡ファンと最適解決定の幾何学的アニメーション</b>・および <b>多台数走行回避・Sim2Real・E2E展開へのロードマップ</b> を技術的・理論的に完全網羅した開発者用仕様書です。
+      </p>
+    </header>
+
+    <!-- SECTION 1: OVERVIEW -->
+    <section id="overview" class="section-block">
+      <h2 class="section-title"><i class="fa-solid fa-flag-checkered"></i> 1. MPC概要 & Pure Pursuit との比較</h2>
+      
+      <p>
+        レーシングカートでサーキットを高速かつ滑らかに周回するためには、車両の物理限界（タイヤの最大横グリップ力）付近を維持しながら正確に走行ラインを追従する必要があります。従来の <b>Pure Pursuit</b>（前方注視点追従）と本リポジトリの <b>MPC</b> には以下の根本的違いがあります。
+      </p>
+
+      <div class="card-grid">
+        <div class="card">
+          <div class="card-title"><i class="fa-solid fa-route"></i> Simple Pure Pursuit (従来の制御)</div>
+          <ul style="padding-left: 1.2rem; color: var(--text-muted); font-size: 0.9rem; display:flex; flex-direction:column; gap:0.5rem;">
+            <li><b>幾何学的追従</b>: 現在位置と目標点の円弧関係のみでステア角を計算（幾何的モデル）。</li>
+            <li><b>未来の予測なし</b>: コーナー手前での減速や、S字コーナーでの振り返し運動を予測できない。</li>
+            <li><b>タイヤ限界の非考慮</b>: 横加速度限界 \(a_{y,\max}\) やステアリング切替え速度制限を直接考慮できないため、高速時にスリップまたはコースアウトしやすい。</li>
+          </ul>
+        </div>
+        <div class="card" style="border-color: rgba(0,242,254,0.4); background: linear-gradient(135deg, rgba(17,24,39,0.9), rgba(0,242,254,0.05));">
+          <div class="card-title"><i class="fa-solid fa-brain"></i> Multi-Purpose MPC (本設計)</div>
+          <ul style="padding-left: 1.2rem; color: var(--text-main); font-size: 0.9rem; display:flex; flex-direction:column; gap:0.5rem;">
+            <li><b>予測制御 (Prediction Horizon \(N\))</b>: 未来の \(N\) ステップ分（例: 20点先まで）の車両挙動とコース曲率を予測。</li>
+            <li><b>動的物理限界の直接考慮</b>: 横加速度制約 \(a_{y,\max}\) やステアリング切替え角速度限界 \(\dot{\delta}_{\max}\) を <b>最適化問題の制約</b> として毎フレーム解く。</li>
+            <li><b>空間表現 (Spatial Domain)</b>: 時間軸ではなく「コース距離 \(s\)」軸で離散化することにより、曲率に応じた最適な速度と操舵入力を二次計画法（OSQP）で一括算出。</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="alert-box tip">
+        <div class="alert-title"><i class="fa-solid fa-lightbulb"></i> なぜMPCで最速ラップが狙えるのか？</div>
+        コーナー侵入時に「どれだけ手前から減速し、いつステアを切り始めるべきか」をOSQPソルバーが 40Hz（25ms周期）でリアルタイムに計算するため、限界コーナリングを実現できるからです。
+      </div>
+    </section>
+
+    <!-- SECTION 2: ARCHITECTURE & FILE STRUCTURE -->
+    <section id="architecture" class="section-block">
+      <h2 class="section-title"><i class="fa-solid fa-sitemap"></i> 2. ファイル構造 & ROS 2 ノード構成</h2>
+
+      <p>MPCは <code>aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros</code> 内にパッケージとして統合されています。</p>
+
+      <h3 style="margin-top: 1.5rem; margin-bottom: 0.75rem; font-size: 1.1rem; color: var(--secondary);">■ ディレクトリ・ファイル構成一覧</h3>
+
+      <div class="code-block tree-view">
+        <div class="tree-dir">aichallenge_submit/multi_purpose_mpc_ros/</div>
+        <div class="tree-item"><span class="tree-dir">config/</span></div>
+        <div class="tree-item" style="padding-left: 2.4rem;"><span class="tree-file">config.yaml</span> <span class="tree-comment">← 【核心】制御パラメータ、ゲインQ/R、速度限界、モデルサイズ等の設定</span></div>
+        <div class="tree-item"><span class="tree-dir">env/final_ver3/</span></div>
+        <div class="tree-item" style="padding-left: 2.4rem;"><span class="tree-file">occupancy_grid_map.yaml / pgm</span> <span class="tree-comment">← コース壁面・境界の占有格子地図</span></div>
+        <div class="tree-item" style="padding-left: 2.4rem;"><span class="tree-file">traj_mincurv.csv</span> <span class="tree-comment">← 【オフライン生成】最小曲率（最速）参照走行ライン</span></div>
+        <div class="tree-item"><span class="tree-dir">launch/</span></div>
+        <div class="tree-item" style="padding-left: 2.4rem;"><span class="tree-file">mpc_controller.launch.py</span> <span class="tree-comment">← ノード起動スクリプト</span></div>
+        <div class="tree-item"><span class="tree-dir">multi_purpose_mpc_ros/</span> <span class="tree-comment">← Python核心処理ライブラリ</span></div>
+        <div class="tree-item" style="padding-left: 2.4rem;"><span class="tree-file">mpc_controller.py</span> <span class="tree-comment">← ROS 2メインノード（40Hzタイマー、トピック送受信、制御適用）</span></div>
+        <div class="tree-item" style="padding-left: 2.4rem;"><span class="tree-dir">core/</span></div>
+        <div class="tree-item" style="padding-left: 3.6rem;"><span class="tree-file">MPC.py</span> <span class="tree-comment">← OSQP二次計画法(QP)問題構築・ソルバー呼び出し</span></div>
+        <div class="tree-item" style="padding-left: 3.6rem;"><span class="tree-file">spatial_bicycle_models.py</span> <span class="tree-comment">← 空間定式化バイシクルモデル＆線形化(LTV)</span></div>
+        <div class="tree-item" style="padding-left: 3.6rem;"><span class="tree-file">reference_path.py</span> <span class="tree-comment">← 参照経路データ管理・コース境界計算</span></div>
+        <div class="tree-item" style="padding-left: 2.4rem;"><span class="tree-file">v2x_vehicle_tracker.py</span> <span class="tree-comment">← 他車追従・緊急ブレーキ・追い越しロジック</span></div>
+        <div class="tree-item last"><span class="tree-file">CMakeLists.txt / setup.py</span> <span class="tree-comment">← Python venv環境自動ビルド定義</span></div>
+      </div>
+    </section>
+
+    <!-- SECTION 3: SYSTEM STRUCTURAL DESIGN (DATA FLOW & SEQUENCE CHARTS) -->
+    <section id="struct-design" class="section-block">
+      <h2 class="section-title"><i class="fa-solid fa-diagram-project"></i> 3. 全体構造設計 (高解像度データフロー & シーケンスチャート)</h2>
+
+      <p>
+        MPCシステム全体がどのように情報をやり取りし、毎フレーム（40Hz）で制御出力を生成しているのかを整理した高解像度構造設計図です。（※文字サイズを大幅拡大し、スクロール表示にも対応しています）。
+      </p>
+
+      <div class="sub-section-title"><i class="fa-solid fa-network-wired"></i> (1) システム全体データフロー図 (Data Flow Diagram)</div>
+
+      <div class="mermaid-box">
+        <pre class="mermaid">
+graph TD
+    subgraph Inputs ["【外部入力データ / ROS 2 トピック】"]
+        Odom[/"/localization/kinematic_state (Odometry)"/]
+        CSV["env/final_ver3/traj_mincurv.csv (最速参照経路)"]
+        Map["env/final_ver3/occupancy_grid_map (コース境界 OGM)"]
+        V2X[/"/v2x/vehicle_positions (他車位置情報)"/]
+    end
+
+    subgraph ControllerNode ["【mpc_controller.py (ROS 2 Control Node - 40Hz)】"]
+        Init["① ノード初期化 & CSV/地図ロード"]
+        Track["② v2x_vehicle_tracker (追従/追い越しモード更新)"]
+        Coord["③ BicycleModel.t2s (ワールド座標 → 空間誤差 e_y, e_psi 変換)"]
+        Solve["④ MPC.get_control (OSQP二次計画法 問題構築 & 求解)"]
+        Post["⑤ ゲイン補正 & LPFフィルタリング"]
+    end
+
+    subgraph OSQP_Engine ["【core/MPC.py & OSQP Solver (C/C++)】"]
+        Formulate["_init_problem (LTV線形化 P, q, A_full, l, u 構築)"]
+        OSQP["osqp.OSQP.solve (ADMM反復解法)"]
+    end
+
+    subgraph Outputs ["【制御出力 / 可視化トピック】"]
+        Cmd[/"/control/command/control_cmd (AckermannControlCommand)"/]
+        VisPred[/"/mpc/prediction (予測軌跡 MarkerArray)"/]
+        VisRef[/"/mpc/ref_path (参照ライン MarkerArray)"/]
+    end
+
+    CSV --> Init
+    Map --> Init
+    Init --> Coord
+    Odom -->|位置 x,y 姿勢yaw 速度v| Track
+    Odom -->|位置 x,y 姿勢yaw| Coord
+    V2X --> Track
+    Track -->|動的障害物| Solve
+    Coord -->|誤差 e_y, e_psi| Solve
+    Solve --> Formulate
+    Formulate --> OSQP
+    OSQP -->|最適制御 v_opt, delta_opt| Solve
+    Solve --> Post
+    Post --> Cmd
+    Post --> VisPred
+    Post --> VisRef
+
+    style Inputs fill:#1e293b,stroke:#00f2fe,stroke-width:2px
+    style ControllerNode fill:#0f172a,stroke:#00f2fe,stroke-width:3px
+    style OSQP_Engine fill:#020617,stroke:#4facfe,stroke-width:3px
+    style Outputs fill:#1e293b,stroke:#43e97b,stroke-width:2px
+        </pre>
+      </div>
+
+      <div class="sub-section-title"><i class="fa-solid fa-arrows-spin"></i> (2) 40Hz 制御ループ シーケンスチャート (Execution Sequence Diagram)</div>
+
+      <div class="mermaid-box">
+        <pre class="mermaid">
+sequenceDiagram
+    autonumber
+    participant Sub as ROS2 Sub (/localization/kinematic_state)
+    participant Node as MPCController (ROS2 Node)
+    participant Model as BicycleModel (空間モデル)
+    participant Path as ReferencePath (参照経路)
+    participant Solver as MPC (OSQP Solver)
+    participant Pub as ROS2 Pub (/control/command/control_cmd)
+
+    Sub->>Node: 1. Odometryデータ受信 (x, y, yaw, v)
+    Note over Node: 40Hz 周期制御タイマー実行 (25ms以内)
+    Node->>Model: 2. update_states(x, y, yaw) 位置更新
+    Node->>Path: 3. get_closest_waypoint(x, y)
+    Path-->>Node: 最寄ウェイポイントID (wp_id)
+    Node->>Model: 4. t2s(temporal_state, reference_waypoint)
+    Model-->>Node: 空間誤差返却 SimpleSpatialState (e_y, e_psi)
+    Node->>Solver: 5. get_control() 制御計算開始
+    activate Solver
+    Solver->>Model: 6. linearize(v_ref, kappa_ref, delta_s)
+    Model-->>Solver: LTVヤコビアン行列 (A_lin, B_lin, f)
+    Solver->>Solver: 7. _init_problem() OSQP行列構築 [P, q, A_full, l, u]
+    Solver->>Solver: 8. optimizer.solve() ADMM反復求解
+    alt 解の導出成功 (status == 'solved')
+        Solver-->>Node: 最適制御入力 u = [v_cmd, delta_cmd]
+    else 解不能 (infeasible)
+        Solver->>Solver: 9. safety_margin 段階的緩和 & 再求解
+        Solver-->>Node: フォールバック制御値
+    end
+    deactivate Solver
+    Node->>Node: 10. ステア角速度制限 & ゲイン乗算 (steering_tire_angle_gain_var)
+    Node->>Pub: 11. AckermannControlCommand 送信
+    Node->>Pub: 12. /mpc/prediction (予測軌跡Marker可視化)
+        </pre>
+      </div>
+
+      <!-- Textual Step Summary Card for Double Readability -->
+      <div class="card-grid" style="margin-top:1.5rem;">
+        <div class="card">
+          <div class="card-title"><i class="fa-solid fa-1"></i> データ受信 & 空間座標変換</div>
+          <p style="font-size:0.85rem; color:var(--text-muted);">
+            ワールド座標 \((x, y, \psi)\) から参照パス最寄点への直交偏差 \(e_y\) と方位角偏差 \(e_\psi\) を計算。
+          </p>
+        </div>
+        <div class="card">
+          <div class="card-title"><i class="fa-solid fa-2"></i> LTV線形化 & OSQP行列構築</div>
+          <p style="font-size:0.85rem; color:var(--text-muted);">
+            動作点でのヤコビアン行列 \(A_{\text{lin}}, B_{\text{lin}}\) から、コスト行列 \(P, q\) と全制約行列 \(A_{\text{full}}, l, u\) を自動生成。
+          </p>
+        </div>
+        <div class="card">
+          <div class="card-title"><i class="fa-solid fa-3"></i> ADMM求解 & 制御出力</div>
+          <p style="font-size:0.85rem; color:var(--text-muted);">
+            OSQPが \(v, \delta\) をミリ秒で導出し、操舵ゲイン補正後に ROS 2 トピックへ 40Hz で配信。
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- SECTION 4: DEEP DIVE SOFTWARE DESIGN (CLASSES, FUNCTIONS, VARIABLES) -->
+    <section id="sw-design" class="section-block">
+      <h2 class="section-title"><i class="fa-solid fa-code-branch"></i> 4. 詳細ソフトウェア設計 (関数・変数レベル)</h2>
+
+      <div class="sub-section-title"><i class="fa-solid fa-cube"></i> (1) 主要クラスとデータ構造マップ</div>
+
+      <div class="custom-table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>クラス名 / ファイル</th>
+              <th>役割と概要</th>
+              <th>主要メンバ変数</th>
+              <th>主要メソッド</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><span class="tag-class">MPCController</span><br><code>mpc_controller.py</code></td>
+              <td>ROS 2 ノード本体。40Hz制御周期で受信オドメトリからMPCソルバーを実行し制御指令を配信。</td>
+              <td><code>self._odom</code>, <code>self._car</code>, <code>self._mpc</code>, <code>self._v2x_tracker</code>, <code>self._stuck_state</code></td>
+              <td><span class="tag-func">_odom_callback()</span><br><span class="tag-func">_publish_control_command()</span><br><span class="tag-func">_update_v2x_mode()</span></td>
+            </tr>
+            <tr>
+              <td><span class="tag-class">MPC</span><br><code>core/MPC.py</code></td>
+              <td>二次計画法 (QP) の定式化および OSQP ソルバーのライフサイクル管理。</td>
+              <td><code>self.optimizer</code>, <code>self.N</code>, <code>self.Q</code>, <code>self.R</code>, <code>self.QN</code>, <code>self.current_control</code></td>
+              <td><span class="tag-func">_init_problem()</span><br><span class="tag-func">get_control()</span><br><span class="tag-func">update_prediction()</span></td>
+            </tr>
+            <tr>
+              <td><span class="tag-class">BicycleModel</span><br><code>core/spatial_bicycle_models.py</code></td>
+              <td>空間表現キネマティック・バイシクルモデル。座標変換およびLTV線形化ヤコビアンの計算。</td>
+              <td><code>self.spatial_state</code>, <code>self.temporal_state</code>, <code>self.s</code>, <code>self.wp_id</code>, <code>self.Ts</code></td>
+              <td><span class="tag-func">s2t()</span>, <span class="tag-func">t2s()</span><br><span class="tag-func">linearize()</span><br><span class="tag-func">get_spatial_derivatives()</span></td>
+            </tr>
+            <tr>
+              <td><span class="tag-class">ReferencePath</span><br><code>core/reference_path.py</code></td>
+              <td>最適化済み参照経路ウェイポイント列、コース幅境界（上下限コリドー）の計算と保持。</td>
+              <td><code>self.waypoints</code>, <code>self.path_constraints</code>, <code>self.border_cells</code></td>
+              <td><span class="tag-func">update_path_constraints()</span><br><span class="tag-func">compute_speed_profile()</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- SECTION 5: OSQP OVERVIEW & INTUITIVE CONCEPT -->
+    <section id="osqp-overview" class="section-block">
+      <h2 class="section-title"><i class="fa-solid fa-box-open"></i> 5. OSQP パッケージ概要 & 初学者向け直感イメージ</h2>
+
+      <div class="card-grid">
+        <div class="card">
+          <div class="card-title"><i class="fa-solid fa-cube"></i> OSQP ライブラリ概要</div>
+          <ul style="font-size:0.88rem; color:var(--text-muted); display:flex; flex-direction:column; gap:0.4rem; padding-left:1.2rem;">
+            <li><b>正式名称</b>: Operator Splitting Quadratic Program Solver</li>
+            <li><b>開発元</b>: オックスフォード大学 Control Group (Oxford University)</li>
+            <li><b>ライセンス</b>: <b style="color:var(--accent);">Apache License 2.0</b> （商用利用、改変、再配布が完全自由）</li>
+            <li><b>用途</b>: 自動運転・ロボティクスのリアルタイムMPC制御におけるデファクトスタンダード。</li>
+          </ul>
+        </div>
+
+        <div class="card" style="border-color:rgba(79,172,254,0.4); background:linear-gradient(135deg, rgba(17,24,39,0.9), rgba(79,172,254,0.05));">
+          <div class="card-title"><i class="fa-solid fa-bolt"></i> なぜ OSQP はミリ秒で解けるのか？</div>
+          <ul style="font-size:0.88rem; color:var(--text-main); display:flex; flex-direction:column; gap:0.4rem; padding-left:1.2rem;">
+            <li><b>疎行列 (Sparse Matrix) 特化</b>: 行列の90%以上を占める「0」の計算をスキップ。</li>
+            <li><b>ADMM分割アルゴリズム</b>: 問題を方程式求解と範囲判定の2つに分解。</li>
+            <li><b>ウォームスタート (Warm-start)</b>: 前のフレームの解を初期値に使い数回で収束。</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="sub-section-title"><i class="fa-solid fa-lightbulb"></i> 【直感イメージ】 ADMMは「理想」と「現実の壁」のキャッチボール！</div>
+
+      <div class="math-card" style="border-color: var(--primary);">
+        <p style="font-size:0.92rem; color:var(--text-main); line-height:1.7;">
+          初学者の方が OSQP (ADMM法) を理解するための最も簡単なイメージは、<b>「理想を追うドライバー (変数 \(\mathbf{z}\))」</b> と <b>「ガードレールやタイヤ限界を管理する審判 (変数 \(\mathbf{y}\))」</b> のキャッチボールです。
+        </p>
+
+        <div class="card-grid" style="margin-top:1rem;">
+          <div style="background:rgba(0,242,254,0.08); padding:1rem; border-radius:10px; border:1px solid rgba(0,242,254,0.3);">
+            <div style="font-weight:700; color:var(--primary);"><i class="fa-solid fa-car-side"></i> 1. ドライバー \(\mathbf{z}\) (運動モデルの理想)</div>
+            <div style="font-size:0.84rem; color:var(--text-muted); margin-top:0.4rem;">
+              「タイムを出すために、この角度で時速100kmでコーナーに突っ込みたい！」（コスト関数 \(\mathbf{P}, \mathbf{q}\) を最小化する計算）
+            </div>
+          </div>
+          <div style="background:rgba(250,112,154,0.08); padding:1rem; border-radius:10px; border:1px solid rgba(250,112,154,0.3);">
+            <div style="font-weight:700; color:var(--accent-warm);"><i class="fa-solid fa-road-barrier"></i> 2. 審判 \(\mathbf{y}\) (コース境界・グリップ限界)</div>
+            <div style="font-size:0.84rem; color:var(--text-muted); margin-top:0.4rem;">
+              「待った！その角度だとコース外のガードレール（制約 \([\mathbf{l}, \mathbf{u}]\))に衝突するから、コース内に収まるよう補正（クリッピング）して！」
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SECTION 6: OSQP ALGORITHM & THEORY WITH NUMERICAL EXAMPLE -->
+    <section id="osqp-algorithm" class="section-block">
+      <h2 class="section-title"><i class="fa-solid fa-square-root-variable"></i> 6. OSQP アルゴリズム原理・パラメータ全定義 & 具体的な数値解法サンプル</h2>
+
+      <p>
+        OSQPの二次計画問題およびADMM更新式に登場する<b>全ての数式記号・パラメータの定義</b>と、<b>具体的に数値を当てはめて最適解を計算する手順のサンプル</b>です。
+      </p>
+
+      <!-- Math Card 1: Standard QP Form -->
+      <div class="math-card">
+        <h4 style="color:var(--primary); margin-bottom: 0.5rem;"><i class="fa-solid fa-square-root-variable"></i> (1) 二次計画法 (QP) の標準形式</h4>
+        $$\min_{\mathbf{z}} \frac{1}{2} \mathbf{z}^\top \mathbf{P} \mathbf{z} + \mathbf{q}^\top \mathbf{z} \quad \text{subject to} \quad \mathbf{l} \le \mathbf{A}_{\text{full}} \mathbf{z} \le \mathbf{u}$$
+      </div>
+
+      <!-- Parameter Definition Table for Section 6 -->
+      <div class="sub-section-title"><i class="fa-solid fa-book-bookmark"></i> ■ 数式内パラメータ・全記号の完全定義一覧</div>
+
+      <div class="custom-table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>記号</th>
+              <th>型 / 次元</th>
+              <th>数学的定義</th>
+              <th>物理的・技術的意味</th>
+              <th>MPCコードでの対応変数 (Python)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>\(\mathbf{z}\)</td>
+              <td>ベクトル \(\mathbb{R}^{(N+1)n_x + N n_u}\)</td>
+              <td>決定変数 (Optimization Variable)</td>
+              <td>状態列 \([\mathbf{x}_0,\dots,\mathbf{x}_N]\) と制御入力列 \([\mathbf{u}_0,\dots,\mathbf{u}_{N-1}]\) を一直線に連結した最適化対象。</td>
+              <td><code>dec.x</code> (OSQP解ベクトル)</td>
+            </tr>
+            <tr>
+              <td>\(\mathbf{P}\)</td>
+              <td>対称疎行列 \(\mathbb{S}_+^{n}\)</td>
+              <td>二次コスト行列 (Hessian Matrix)</td>
+              <td>状態偏差および制御入力の「大きさの自乗」に対する重みコストゲイン。</td>
+              <td><code>P = sparse.block_diag([...])</code></td>
+            </tr>
+            <tr>
+              <td>\(\mathbf{q}\)</td>
+              <td>ベクトル \(\mathbb{R}^n\)</td>
+              <td>一次コストベクトル (Linear Cost)</td>
+              <td>目標参照状態 \(\mathbf{x}_{\text{ref}}\) や目標速度 \(v_{\text{ref}}\) との偏差を評価する一次項係数。</td>
+              <td><code>q = hstack([-tile(...)*xr, ...])</code></td>
+            </tr>
+            <tr>
+              <td>\(\mathbf{A}_{\text{full}}\)</td>
+              <td>疎行列 \(\mathbb{R}^{m \times n}\)</td>
+              <td>全制約行列 (Constraint Matrix)</td>
+              <td>①状態方程式等式、②状態・入力上下限、③ステア角速度変化量を一括統合した制約行列。</td>
+              <td><code>A_full = sparse.vstack([...])</code></td>
+            </tr>
+            <tr>
+              <td>\(\mathbf{l}, \mathbf{u}\)</td>
+              <td>ベクトル \(\mathbb{R}^m\)</td>
+              <td>制約の下限 (Lower) / 上限 (Upper)</td>
+              <td>コース左右境界幅 \([lb_n, ub_n]\)、最高速度 \(v_{\max}\)、ステア角/角速度の限界値。</td>
+              <td><code>l = np.hstack([leq, lineq_...])`<br>`u = np.hstack([ueq, uineq_...])</code></td>
+            </tr>
+            <tr>
+              <td>\(\mathbf{y}\)</td>
+              <td>ベクトル \(\mathbb{R}^m\)</td>
+              <td>補助スラック変数 (Slack Variable)</td>
+              <td>制約条件 \(\mathbf{y} = \mathbf{A}_{\text{full}} \mathbf{z}\) を満たすよう ADMM 内で射影判定を受ける変数。</td>
+              <td>OSQP C言語コア内部の <code>work->y</code></td>
+            </tr>
+            <tr>
+              <td>\(\boldsymbol{\nu}\)</td>
+              <td>ベクトル \(\mathbb{R}^m\)</td>
+              <td>双対変数 (Lagrange Multiplier)</td>
+              <td>制約違反に対するペナルティを蓄積し、理想解 \(\mathbf{z}\) を制約内に引き戻す乗数。</td>
+              <td>OSQP C言語コア内部の双対変数</td>
+            </tr>
+            <tr>
+              <td>\(\rho\)</td>
+              <td>スカラー \(\rho > 0\)</td>
+              <td>ADMMステップサイズ (Penalty)</td>
+              <td>制約偏差に対する懲罰の強さを制御するハイパーパラメータ。</td>
+              <td><code>settings.rho</code> (デフォルト 0.1)</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- SUB-SECTION: CONCRETE NUMERICAL SAMPLE & CALCULATION TRACE -->
+      <div class="sub-section-title"><i class="fa-solid fa-calculator"></i> ■【具体数値例】 \(N=2\) の極小MPCモデルで追う定式化と最適解計算</div>
+
+      <div class="math-card" style="border-color: var(--accent); background: rgba(67, 233, 123, 0.04);">
+        <p style="font-size:0.9rem; color:var(--text-main);">
+          抽象的な行列を具体的な数値に置き換えるため、<b>「ホライズン \(N=2\) ステップで、カートをコース中央（\(e_y=0\)）へ復帰させる極小モデル」</b> を例に挙げて手計算レベルで数値を追跡します。
+        </p>
+
+        <div style="margin-top:1rem; font-size:0.88rem; color:var(--text-muted);">
+          <b>【前提設定の数値】</b>
+          <ul style="padding-left:1.2rem; display:flex; flex-direction:column; gap:0.3rem; margin-top:0.3rem;">
+            <li>カート状態: 横偏差 \(x_k = e_{y,k}\) のみ（1次元）。初期位置 \(x_0 = 1.0\text{ m}\) （コース左に1mずれている）。</li>
+            <li>制御入力: ステア操作 \(u_k = \delta_k\)。</li>
+            <li>運動モデル: 1ステップ先への横偏差推移 \(x_{k+1} = x_k + 0.5 u_k\) （\(A=1, B=0.5\)）。</li>
+            <li>目標位置: \(x_{\text{ref}} = 0\text{ m}\)。</li>
+            <li>重みゲイン: 状態コスト \(Q = 10\), 終端コスト \(Q_N = 20\), 入力コスト \(R = 1\)。</li>
+            <li>制約範囲: コース幅 boundary \(-1.5\text{ m} \le x_k \le 1.5\text{ m}\)、最大ステア限界 \(-1.0 \le u_k \le 1.0\)。</li>
+          </ul>
+        </div>
+
+        <div style="margin-top:1.2rem;">
+          <b style="color:var(--primary);">1. 決定変数ベクトル \(\mathbf{z}\) の数値構成 (5次元):</b>
+          $$\mathbf{z} = \begin{bmatrix} x_0 \\ x_1 \\ x_2 \\ u_0 \\ u_1 \end{bmatrix} \in \mathbb{R}^5$$
+
+          <b style="color:var(--primary); display:block; margin-top:0.8rem;">2. コスト関数 \(J\) とコスト行列 \(\mathbf{P}\) の数値あてはめ:</b>
+          $$J = \frac{1}{2} \mathbf{z}^\top \mathbf{P} \mathbf{z} = \frac{1}{2} \left( 10 x_0^2 + 10 x_1^2 + 20 x_2^2 + 1 u_0^2 + 1 u_1^2 \right)$$
+          $$\mathbf{P} = \text{diag}(10, 10, 20, 1, 1), \quad \mathbf{q} = \begin{bmatrix} 0 & 0 & 0 & 0 & 0 \end{bmatrix}^\top$$
+
+          <b style="color:var(--primary); display:block; margin-top:0.8rem;">3. 全制約行列 \(\mathbf{A}_{\text{full}}\) と境界ベクトル \(\mathbf{l}, \mathbf{u}\) の具体数値表現:</b>
+          <p style="font-size:0.83rem; color:var(--text-muted); margin-bottom:0.4rem;">
+            初期位置固定 (\(x_0=1.0\)), 状態遷移 (\(x_1 - x_0 - 0.5u_0 = 0\), \(x_2 - x_1 - 0.5u_1 = 0\)), 状態範囲, 入力範囲を7本の行ベクトルとしてスタック：
+          </p>
+          $$\mathbf{A}_{\text{full}} = \begin{bmatrix}
+          1 & 0 & 0 & 0 & 0 \\
+          -1 & 1 & 0 & -0.5 & 0 \\
+          0 & -1 & 1 & 0 & -0.5 \\
+          0 & 1 & 0 & 0 & 0 \\
+          0 & 0 & 1 & 0 & 0 \\
+          0 & 0 & 0 & 1 & 0 \\
+          0 & 0 & 0 & 0 & 1
+          \end{bmatrix}, \quad
+          \mathbf{l} = \begin{bmatrix} 1.0 \\ 0.0 \\ 0.0 \\ -1.5 \\ -1.5 \\ -1.0 \\ -1.0 \end{bmatrix}, \quad
+          \mathbf{u} = \begin{bmatrix} 1.0 \\ 0.0 \\ 0.0 \\ 1.5 \\ 1.5 \\ 1.0 \\ 1.0 \end{bmatrix}$$
+
+          <b style="color:var(--accent); display:block; margin-top:1rem;">4. OSQP ソルバーが探索・計算する最適解結果:</b>
+          <ul style="font-size:0.85rem; color:var(--text-main); padding-left:1.2rem; margin-top:0.3rem; display:flex; flex-direction:column; gap:0.4rem;">
+            <li><b>操作なしの場合 (\(u_0=0, u_1=0\))</b>: \(x_0=1.0, x_1=1.0, x_2=1.0 \implies \text{評価コスト } J = \mathbf{20.0}\)</li>
+            <li><b>OSQPが導く最適解 (\(u_0=-1.0, u_1=-1.0\))</b>:
+              <br>・\(x_1 = 1.0 + 0.5(-1.0) = \mathbf{0.5\text{ m}}\) （ステア限界一杯でコース中央へ寄せる）
+              <br>・\(x_2 = 0.5 + 0.5(-1.0) = \mathbf{0.0\text{ m}}\) （2ステップ目でコース中央 \(e_y=0\) へ着地！）
+              <br>・評価コスト: \(J = \frac{1}{2}(10(1.0)^2 + 10(0.5)^2 + 20(0.0)^2 + 1(-1.0)^2 + 1(-1.0)^2) = \frac{1}{2}(10 + 2.5 + 0 + 1 + 1) = \mathbf{7.25}\)
+            </li>
+          </ul>
+
+          <div style="margin-top:0.8rem; font-size:0.85rem; color:var(--accent); background:rgba(67,233,123,0.1); padding:0.6rem 0.8rem; border-radius:6px;">
+            <i class="fa-solid fa-circle-check"></i> <b>結果:</b> コストが \(20.0 \to 7.25\) に激減し、すべての制約（\(-1.5 \le x_k \le 1.5\), \(-1.0 \le u_k \le 1.0\))を満たすため、この <b>\(u_0 = -1.0\) (最大右ステア)</b> が 40Hz の制御出力として車両へ送信されます！
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SECTION 7: OSQP MATRIX CONSTRUCTION MECHANICS & DIAG FUNCTIONS -->
+    <section id="osqp-matrix" class="section-block">
+      <h2 class="section-title"><i class="fa-solid fa-cubes"></i> 7. OSQP 行列構築 & diag 対角関数の詳細解説</h2>
+
+      <p>
+        <code>MPC.py</code> の <span class="tag-func">_init_problem()</span> において、状態方程式と制約条件を OSQP の入力行列へ展開する詳細アルゴリズムおよび、使用される <b><code>diag</code> / <code>diags</code> / <code>block_diag</code> 関数の技術的意味と役割</b> です。
+      </p>
+
+      <!-- DIAG FUNCTION EXPLANATION CARD -->
+      <div class="math-card" style="border-color: var(--secondary);">
+        <h4 style="color:var(--secondary); margin-bottom: 0.5rem;"><i class="fa-solid fa-table-cells"></i> ■ `diag` / `diags` / `block_diag` 関数の役割と数学的意味</h4>
+
+        <p style="font-size:0.9rem; color:var(--text-main); line-height:1.7;">
+          数学における <b>対角行列 (Diagonal Matrix) \(\text{diag}(d_1, d_2, \dots, d_n)\)</b> とは、主対角成分だけに要素を持ち、それ以外の非対角成分がすべて \(0\) である正方行列のことです。
+        </p>
+
+        $$\text{diag}(d_1, d_2, d_3) = \begin{bmatrix} d_1 & 0 & 0 \\ 0 & d_2 & 0 \\ 0 & 0 & d_3 \end{bmatrix}$$
+
+        <div style="margin-top:1rem; font-size:0.88rem; color:var(--text-muted);">
+          <b>【MPC制御での役割】</b>
+          <p style="margin-top:0.3rem;">
+            MPCでは、状態変数（直交偏差 \(e_y\)、方位角偏差 \(e_\psi\)、経過時間 \(t\)）や制御入力（目標速度 \(v\)、ステア角 \(\delta\)）の相互干渉（非対角項）を一旦独立として扱い、<b>各状態に対して個別かつ独立に重みペナルティゲインを割り当てる</b>ためにコスト行列 \(\mathbf{Q}, \mathbf{R}, \mathbf{Q}_N\) を対角行列として生成します。
+          </p>
+        </div>
+
+        <div class="custom-table-container" style="margin-top:1rem;">
+          <table>
+            <thead>
+              <tr>
+                <th>関数名 (Python)</th>
+                <th>使用ライブラリ</th>
+                <th>数学的動作・処理内容</th>
+                <th>MPCコードでの具体的な使用箇所</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>sparse.diags([Q0, Q1, Q2])</code></td>
+                <td><code>scipy.sparse</code></td>
+                <td>1次元リストから<b>疎行列 (Sparse Matrix) 形式</b>の対角行列を生成。メモリ消費を大幅カット。</td>
+                <td><code>mpc_config.Q = sparse.diags(cfg_mpc.Q)</code><br>ゲイン設定 `config.yaml` から Q, R, QN を疎対角行列化</td>
+              </tr>
+              <tr>
+                <td><code>sparse.block_diag([A, B, C])</code></td>
+                <td><code>scipy.sparse</code></td>
+                <td>複数の行列を主対角線上にブロック状に並べた<b>大型対角ブロッキング疎行列</b>を生成。</td>
+                <td><code>P = sparse.block_diag([kron(eye(N), Q), QN, kron(eye(N), R)])</code><br>ホライズン全ステップの Q, QN, R をまとめて超大型 Hessian 行列 P を構成</td>
+              </tr>
+              <tr>
+                <td><code>np.diag(self.Q.toarray())</code></td>
+                <td><code>numpy</code></td>
+                <td>対角行列の主対角成分のみを1次元ベクトルとして抽出、または1次元配列から密行列を生成。</td>
+                <td><code>q = -np.tile(np.diag(self.Q.toarray()), N) * xr</code><br>一次コストベクトル q の計算で対角要素を取り出して積算</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <h3 style="margin-top: 2rem; margin-bottom: 0.75rem; font-size: 1.1rem; color: var(--secondary);">■ 1. 決定変数ベクトル \(z\) のメモリレイアウト</h3>
+      $$\mathbf{z} = \begin{bmatrix} \mathbf{x}_0 \\ \mathbf{x}_1 \\ \vdots \\ \mathbf{x}_N \\ \mathbf{u}_0 \\ \mathbf{u}_1 \\ \vdots \\ \mathbf{u}_{N-1} \end{bmatrix} \in \mathbb{R}^{(N+1)n_x + N n_u}, \quad (n_x = 3, n_u = 2)$$
+
+      <h3 style="margin-top: 2rem; margin-bottom: 0.75rem; font-size: 1.1rem; color: var(--secondary);">■ 2. コスト行列 \(P\) と一次項ベクトル \(q\) の構築</h3>
+
+      <div class="code-block">
+# sparse.block_diag 関数を用いて全ホライズンのコスト行列 P を対角ブロック合成
+P = sparse.block_diag([
+    sparse.kron(sparse.eye(N), self.Q),   # 0 ～ N-1 ステップの状態コスト Q (対角)
+    self.QN,                                # N ステップ目の終端コスト QN (対角)
+    sparse.kron(sparse.eye(N), self.R)    # 0 ～ N-1 ステップの入力コスト R (対角)
+], format='csc')
+
+# np.diag で Q, R の対角ベクトルを取り出し、参照ベクトル xr, ur と積算して一次ベクトル q を構築
+q = np.hstack([
+    -np.tile(np.diag(self.Q.toarray()), N) * xr[:-self.nx],
+    -self.QN.dot(xr[-self.nx:]),
+    -np.tile(np.diag(self.R.toarray()), N) * ur
+])
+      </div>
+
+      <h3 style="margin-top: 2rem; margin-bottom: 0.75rem; font-size: 1.1rem; color: var(--secondary);">■ 3. 全制約行列 \(A_{\text{full}}\) のスタック構成</h3>
+
+      <div class="code-block">
+# 1. 状態ダイナミクス等式制約: Ax + Bu = 0
+Ax = sparse.kron(sparse.eye(N + 1), -sparse.eye(self.nx)) + sparse.csc_matrix(A)
+Bu = sparse.csc_matrix(B)
+Aeq = sparse.hstack([Ax, Bu])
+
+# 2. ステアリング角速度 (Steering Rate) 変化量制約行列
+steering_rate_matrix = np.zeros((N - 1, nx_N + nu_N))
+for i in range(N - 1):
+    steering_rate_matrix[i, nx_N + self.nu*i + 1]     = -1  # u_i[1]  (現在のステア角)
+    steering_rate_matrix[i, nx_N + self.nu*(i+1) + 1] =  1  # u_{i+1}[1] (次のステア角)
+
+# 3. 3つの制約行列を縦方向に垂直結合 (vstack)
+A_full = sparse.vstack([
+    Aeq,                        # [層1] 状態遷移モデル (等式制約)
+    sparse.eye(nx_N + nu_N),    # [層2] 状態・入力境界 (不等式制約)
+    sparse.csc_matrix(steering_rate_matrix) # [層3] ステア角速度制限 (不等式制約)
+], format='csc')
+      </div>
+    </section>
+
+    <!-- SECTION 8: CONTROL THEORY & MATH MODEL -->
+    <section id="theory" class="section-block">
+      <h2 class="section-title"><i class="fa-solid fa-calculator"></i> 8. 空間運動モデル (Spatial Kinematic Bicycle Model)</h2>
+
+      <div class="math-card">
+        <h4 style="color:var(--primary); margin-bottom: 0.5rem;"><i class="fa-solid fa-square-root-variable"></i> (1) 状態ベクトルと制御入力ベクトル</h4>
+        $$\mathbf{x}(s) = \begin{bmatrix} e_y(s) \\ e_\psi(s) \\ t(s) \end{bmatrix}, \quad \mathbf{u}(s) = \begin{bmatrix} v(s) \\ \delta(s) \end{bmatrix}$$
+      </div>
+
+      <div class="math-card">
+        <h4 style="color:var(--primary); margin-bottom: 0.5rem;"><i class="fa-solid fa-wave-square"></i> (2) 空間運動方程式の微分</h4>
+        $$\frac{d e_y}{ds} = \frac{v \sin(e_\psi)}{\dot{s}}, \quad \frac{d e_\psi}{ds} = \frac{\dot{\psi}}{\dot{s}} - \kappa(s), \quad \frac{d t}{ds} = \frac{1}{\dot{s}}$$
+      </div>
+    </section>
+
+    <!-- SECTION 9: PARAMETERS GUIDE -->
+    <section id="parameters" class="section-block">
+      <h2 class="section-title"><i class="fa-solid fa-sliders"></i> 9. 設定パラメータ (`config.yaml`) 完全解説</h2>
+
+      <div class="custom-table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>パラメータ名</th>
+              <th>現在値</th>
+              <th>技術的意味</th>
+              <th>高速化・調整のポイント</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>mpc.N</code></td>
+              <td><code>20</code></td>
+              <td>予測ホライズンのステップ数</td>
+              <td>20〜25 が適正。計算負荷と先読みのトレードオフ。</td>
+            </tr>
+            <tr>
+              <td><code>mpc.v_max</code></td>
+              <td><code>45.0</code> [m/s]</td>
+              <td>直線での最高許容目標速度</td>
+              <td>最高速の解放（162km/h）。</td>
+            </tr>
+            <tr>
+              <td><code>mpc.ay_max</code></td>
+              <td><code>13.0</code> [m/s²]</td>
+              <td>許容限界横加速度</td>
+              <td><b>【最重要】</b>タイヤの限界グリップを引き出すキー。</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- SECTION 10: INTERACTIVE SIMULATOR -->
+    <section id="interactive-sim" class="section-block">
+      <h2 class="section-title"><i class="fa-solid fa-gamepad"></i> 10. 動的周回シミュレータ (Live Track Simulator)</h2>
+      
+      <div class="sim-container">
+        <div class="sim-canvas-wrapper">
+          <canvas id="mpcCanvas" width="700" height="440"></canvas>
+          <div style="position: absolute; bottom: 10px; left: 15px; font-size: 0.78rem; color: rgba(255,255,255,0.6); pointer-events: none;">
+            <span style="color:#00f2fe;">■ 参照パス (Min-Curvature)</span> &nbsp;&nbsp;
+            <span style="color:#43e97b;">■ カート現在位置</span> &nbsp;&nbsp;
+            <span style="color:#fa709a;">-- MPC 予測軌跡 (\(N\))</span>
+          </div>
+        </div>
+
+        <div class="sim-controls">
+          <h4 style="font-size:0.95rem; color:var(--primary);"><i class="fa-solid fa-sliders"></i> パラメータリアルタイム変更</h4>
+
+          <div class="control-group">
+            <label>限界横加速度 ay_max [m/s²]: <span class="val" id="valAyMax">13.0</span></label>
+            <input type="range" id="inputAyMax" min="3.0" max="20.0" step="0.5" value="13.0">
+          </div>
+
+          <div class="control-group">
+            <label>最高速度 v_max [m/s]: <span class="val" id="valVMax">40.0</span></label>
+            <input type="range" id="inputVMax" min="10.0" max="60.0" step="2.0" value="40.0">
+          </div>
+
+          <div class="control-group">
+            <label>ステア抑制ゲイン R[1] (R_delta): <span class="val" id="valRDelta">1200</span></label>
+            <input type="range" id="inputRDelta" min="100" max="3000" step="100" value="1200">
+          </div>
+
+          <div class="control-group">
+            <label>先行予測ホライズン N: <span class="val" id="valHorizon">20</span></label>
+            <input type="range" id="inputHorizon" min="5" max="30" step="1" value="20">
+          </div>
+
+          <div class="control-group">
+            <label>遅延先読みオフセット wp_offset: <span class="val" id="valOffset">2</span></label>
+            <input type="range" id="inputOffset" min="0" max="5" step="1" value="2">
+          </div>
+
+          <button class="btn-action" id="btnResetSim"><i class="fa-solid fa-rotate-left"></i> シミュレーションリセット</button>
+
+          <div style="font-size:0.8rem; color:var(--text-muted); background:rgba(0,0,0,0.3); padding:0.6rem; border-radius:6px;">
+            <div>現在の横加速度 \(a_y\): <b id="statAy" style="color:var(--accent);">0.00</b> m/s²</div>
+            <div>車速 \(v\): <b id="statV" style="color:var(--primary);">0.00</b> m/s</div>
+            <div>横偏差 \(e_y\): <b id="statEy" style="color:#fff;">0.00</b> m</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SECTION 10-2: GEOMETRIC CANDIDATE FAN & OPTIMIZATION SELECTION ANIMATION -->
+    <section id="geometric-fan" class="section-block">
+      <h2 class="section-title"><i class="fa-solid fa-compass-drafting"></i> 10-2. MPC 候補軌跡ファン (Candidate Fan) & 最適値選定プロセスの幾何学的可視化</h2>
+
+      <p>
+        「MPCが毎フレーム（40Hz）でどんな走行ラインの選択肢（未来の予測候補線群）を描き、どのように制約条件でフィルタリングして最適解を選び出しているのか」が幾何学的に一目で体感できる対話型アニメーションです。
+      </p>
+
+      <!-- CONCEPT CARDS -->
+      <div class="card-grid" style="margin-bottom:1.5rem;">
+        <div class="card" style="border-color: rgba(239,68,68,0.4); background: rgba(239,68,68,0.05);">
+          <div class="card-title" style="color:var(--danger);"><i class="fa-solid fa-circle-xmark"></i> 🔴 1. コースアウト候補 (NG)</div>
+          <p style="font-size:0.85rem; color:var(--text-muted);">
+            壁やガードレールを超えてしまう制御候補。制約 \([\mathbf{l}, \mathbf{u}]\) により <b>無条件に排除 (Infeasible)</b> されます。
+          </p>
+        </div>
+        <div class="card" style="border-color: rgba(255,183,3,0.4); background: rgba(255,183,3,0.05);">
+          <div class="card-title" style="color:var(--warning);"><i class="fa-solid fa-triangle-exclamation"></i> 🟡 2. 高コスト / 限界オーバー候補</div>
+          <p style="font-size:0.85rem; color:var(--text-muted);">
+            大回り・横加速度 $a_y > a_{y,\max}$（スリップ限界）や急激なステア操作を要する候補。コスト関数 $J$ が高いため選ばれません。
+          </p>
+        </div>
+        <div class="card" style="border-color: rgba(67,233,123,0.4); background: rgba(67,233,123,0.05);">
+          <div class="card-title" style="color:var(--accent);"><i class="fa-solid fa-circle-check"></i> 🟢 3. OSQP 選択・最適軌跡 ($\mathbf{z}^*$)</div>
+          <p style="font-size:0.85rem; color:var(--text-main);">
+            制約をすべて満たし、参照ライン偏差およびエネルギー消費が **最も最小（最小コスト）となる唯一の1本** が実車に命令されます。
+          </p>
+        </div>
+      </div>
+
+      <!-- FAN ANIMATION CANVAS CONTAINER -->
+      <div class="sim-container">
+        <div class="sim-canvas-wrapper">
+          <canvas id="fanCanvas" width="700" height="440"></canvas>
+
+          <!-- Interactive Overlay Status Badge -->
+          <div style="position: absolute; top: 15px; left: 15px; background: rgba(5,8,17,0.85); border:1px solid var(--primary); padding: 0.5rem 1rem; border-radius: 8px; font-size:0.85rem; color: var(--primary); backdrop-filter: blur(8px);">
+            <i class="fa-solid fa-network-wired"></i> <span id="fanPhaseText">Phase 1: 候補軌跡ファン (Candidate Trajectory Fan) の展開中</span>
+          </div>
+
+          <div style="position: absolute; bottom: 10px; left: 15px; font-size: 0.78rem; color: rgba(255,255,255,0.7); pointer-events: none;">
+            <span style="color:#ef4444;">-- コースアウトNG</span> &nbsp;&nbsp;
+            <span style="color:#ffb703;">-- 高コスト/スリップNG</span> &nbsp;&nbsp;
+            <span style="color:#43e97b; font-weight:700;">━ OSQP 最適解ライン (\(\mathbf{z}^*\))</span>
+          </div>
+        </div>
+
+        <div class="sim-controls">
+          <h4 style="font-size:0.95rem; color:var(--secondary);"><i class="fa-solid fa-sliders"></i> カート状況 & コース条件の操作</h4>
+
+          <div class="control-group">
+            <label>カートの横偏差 e_y (初期位置): <span class="val" id="valFanEy">1.2</span> m</label>
+            <input type="range" id="inputFanEy" min="-2.0" max="2.0" step="0.2" value="1.2">
+          </div>
+
+          <div class="control-group">
+            <label>コーナーの曲率 κ (カーブの急さ): <span class="val" id="valFanKappa">0.035</span></label>
+            <input type="range" id="inputFanKappa" min="0.005" max="0.07" step="0.005" value="0.035">
+          </div>
+
+          <div class="control-group">
+            <label>限界横加速度制限 ay_max: <span class="val" id="valFanAy">10.0</span> m/s²</label>
+            <input type="range" id="inputFanAy" min="3.0" max="18.0" step="0.5" value="10.0">
+          </div>
+
+          <div style="display:flex; gap:0.5rem; margin-top:0.5rem;">
+            <button class="btn-action" id="btnFanToggle" style="flex:1;"><i class="fa-solid fa-pause"></i> 一時停止 / 再生</button>
+            <button class="btn-action" id="btnFanStep" style="flex:1; background:linear-gradient(135deg, var(--secondary) 0%, #3b82f6 100%);"><i class="fa-solid fa-forward-step"></i> ステップ更新</button>
+          </div>
+
+          <!-- COST BREAKDOWN BOX -->
+          <div style="font-size:0.8rem; color:var(--text-muted); background:rgba(0,0,0,0.4); padding:0.8rem; border-radius:8px; border:1px solid var(--border-color); margin-top:0.5rem;">
+            <div style="font-weight:700; color:var(--primary); margin-bottom:0.4rem;"><i class="fa-solid fa-chart-pie"></i> 最適解 \(\mathbf{z}^*\) の評価内訳</div>
+            <div>コース偏差コスト \(Q \cdot e_y^2\): <b id="statFanEyCost" style="color:#fff;">0.00</b></div>
+            <div>操舵入力コスト \(R \cdot \delta^2\): <b id="statFanRCost" style="color:#fff;">0.00</b></div>
+            <div><b>合計最小コスト \(J^*\): <span id="statFanTotalJ" style="color:var(--accent); font-size:0.95rem;">0.00</span></b></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SECTION 11: STEP BY STEP TUNING GUIDE -->
+    <section id="tuning-guide" class="section-block">
+      <h2 class="section-title"><i class="fa-solid fa-rocket"></i> 11. 初心者のための高速走行化開発ステップ</h2>
+
+      <div class="card-grid">
+        <div class="card">
+          <div class="card-title">Step 1: 低速での完走確認</div>
+          <p style="font-size:0.85rem; color:var(--text-muted);">
+            <code>v_max: 15.0</code>, <code>ay_max: 5.5</code> で起動し、コースアウトせずにトラックを安定周回できることを確認。
+          </p>
+        </div>
+        <div class="card">
+          <div class="card-title">Step 2: ay_max の段階的引き上げ</div>
+          <p style="font-size:0.85rem; color:var(--text-muted);">
+            コーナーでの旋回速度を向上させるため <code>ay_max</code> を 8.0 → 11.0 → 13.0 へ上昇。
+          </p>
+        </div>
+        <div class="card">
+          <div class="card-title">Step 3: 直線速度 v_max 解放 & ゲイン微調整</div>
+          <p style="font-size:0.85rem; color:var(--text-muted);">
+            <code>v_max: 45.0</code> に引き上げ、S字での応答遅れがある場合は <code>steer_rate_max: 2.0</code> や <code>wp_id_offset: 2</code> を調整。
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- SECTION 12: FUTURE DEVELOPMENT ROADMAP & HINTS -->
+    <section id="future-roadmap" class="section-block">
+      <h2 class="section-title"><i class="fa-solid fa-compass"></i> 12. 今後の開発アドバイス (複数台レース・Sim2Real・E2E展開)</h2>
+
+      <div class="sub-section-title"><i class="fa-solid fa-cars"></i> (1) 複数台走行 (マルチカート・レース) での回避・追い越し戦略</div>
+
+      <div class="card-grid">
+        <div class="card">
+          <div class="card-title"><i class="fa-solid fa-satellite-dish"></i> V2X位置情報の活用 (V2XVehicleTracker)</div>
+          <p style="font-size:0.85rem; color:var(--text-muted);">
+            本コード内の <code>v2x_vehicle_tracker.py</code> は他車の過去位置から差分速度 \((v_x, v_y)\) を推定し、未来のステップにおける他車位置を予測します。
+          </p>
+        </div>
+
+        <div class="card">
+          <div class="card-title"><i class="fa-solid fa-road-barrier"></i> 動的コリドー狭窄 (PathConstraints & BorderCells)</div>
+          <p style="font-size:0.85rem; color:var(--text-muted);">
+            <code>path_constraints_provider</code> ノードと連携し、他車が占有する空間領域を MPC のコース上限・下限コリドー \([lb_n, ub_n]\) から動的に「削り落とす」手法。
+          </p>
+        </div>
+      </div>
+
+      <div class="sub-section-title"><i class="fa-solid fa-microchip"></i> (2) Sim2Real (シミュレータ $\to$ 実機カート移植) の成功ポイント</div>
+
+      <div class="math-card" style="border-color:var(--secondary);">
+        <div class="card-grid">
+          <div>
+            <h4 style="color:var(--secondary);"><i class="fa-solid fa-stopwatch"></i> 1. 通信・アクチュエータ遅延補償</h4>
+            <div class="code-block" style="font-size:0.78rem;">
+mpc:
+  delay_compensation_sec: 0.08             # [s] 80ms の制御遅延を先読み
+  enable_dynamic_delay_compensation: true  # 速度に応じた動的遅延補償
+            </div>
+          </div>
+
+          <div>
+            <h4 style="color:var(--secondary);"><i class="fa-solid fa-scale-balanced"></i> 2. ステアリング伝達比・減衰のキャリブレーション</h4>
+            <div class="code-block" style="font-size:0.78rem;">
+mpc:
+  steering_tire_angle_gain_var: 1.639   # 実機カートの操舵系ゲインに完全適合
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- JavaScript for Interactive Simulators & Mermaid Init -->
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      // Initialize Mermaid with Large High-Readability Font Config
+      mermaid.initialize({
+        startOnLoad: true,
+        theme: 'dark',
+        fontSize: 16,
+        sequence: {
+          actorFontSize: 16,
+          noteFontSize: 14,
+          messageFontSize: 15,
+          width: 240,
+          height: 50
+        },
+        flowchart: {
+          nodeSpacing: 50,
+          rankSpacing: 50,
+          curve: 'basis'
+        }
+      });
+
+      // -------------------------------------------------------------
+      // SIMULATOR 1: TRACK LAP SIMULATOR
+      // -------------------------------------------------------------
+      const canvas1 = document.getElementById('mpcCanvas');
+      const ctx1 = canvas1.getContext('2d');
+
+      const inputAyMax = document.getElementById('inputAyMax');
+      const inputVMax = document.getElementById('inputVMax');
+      const inputRDelta = document.getElementById('inputRDelta');
+      const inputHorizon = document.getElementById('inputHorizon');
+      const inputOffset = document.getElementById('inputOffset');
+
+      const valAyMax = document.getElementById('valAyMax');
+      const valVMax = document.getElementById('valVMax');
+      const valRDelta = document.getElementById('valRDelta');
+      const valHorizon = document.getElementById('valHorizon');
+      const valOffset = document.getElementById('valOffset');
+
+      const statAy = document.getElementById('statAy');
+      const statV = document.getElementById('statV');
+      const statEy = document.getElementById('statEy');
+
+      function updateSliderValues() {
+        valAyMax.textContent = parseFloat(inputAyMax.value).toFixed(1);
+        valVMax.textContent = parseFloat(inputVMax.value).toFixed(1);
+        valRDelta.textContent = inputRDelta.value;
+        valHorizon.textContent = inputHorizon.value;
+        valOffset.textContent = inputOffset.value;
+      }
+
+      [inputAyMax, inputVMax, inputRDelta, inputHorizon, inputOffset].forEach(el => {
+        el.addEventListener('input', updateSliderValues);
+      });
+
+      const pathPoints = [];
+      const numPoints = 300;
+      for (let i = 0; i < numPoints; i++) {
+        const t = (i / numPoints) * Math.PI * 2;
+        const x = 350 + 260 * Math.sin(t);
+        const y = 220 + 140 * Math.sin(2 * t) / 1.5;
+        pathPoints.push({ x, y });
+      }
+
+      const pathCurvatures = [];
+      for (let i = 0; i < numPoints; i++) {
+        const pPrev = pathPoints[(i - 1 + numPoints) % numPoints];
+        const pCurr = pathPoints[i];
+        const pNext = pathPoints[(i + 1) % numPoints];
+
+        const dx1 = pCurr.x - pPrev.x, dy1 = pCurr.y - pPrev.y;
+        const dx2 = pNext.x - pCurr.x, dy2 = pNext.y - pCurr.y;
+
+        const heading1 = Math.atan2(dy1, dx1);
+        const heading2 = Math.atan2(dy2, dx2);
+        let dh = heading2 - heading1;
+        while (dh > Math.PI) dh -= Math.PI * 2;
+        while (dh < -Math.PI) dh += Math.PI * 2;
+
+        const ds = Math.hypot(dx1, dy1);
+        pathCurvatures.push(Math.abs(dh / (ds + 1e-5)));
+      }
+
+      let kart = {
+        sIndex: 0,
+        x: pathPoints[0].x,
+        y: pathPoints[0].y,
+        yaw: 0,
+        v: 10,
+        ey: 0,
+        epsi: 0
+      };
+
+      document.getElementById('btnResetSim').addEventListener('click', () => {
+        kart = {
+          sIndex: 0,
+          x: pathPoints[0].x,
+          y: pathPoints[0].y,
+          yaw: 0,
+          v: 10,
+          ey: 0,
+          epsi: 0
+        };
+      });
+
+      function animLoop1() {
+        ctx1.clearRect(0, 0, canvas1.width, canvas1.height);
+
+        const ayMax = parseFloat(inputAyMax.value);
+        const vMax = parseFloat(inputVMax.value);
+        const rDelta = parseFloat(inputRDelta.value);
+        const N = parseInt(inputHorizon.value);
+        const offset = parseInt(inputOffset.value);
+
+        ctx1.beginPath();
+        ctx1.strokeStyle = 'rgba(0, 242, 254, 0.4)';
+        ctx1.lineWidth = 3;
+        for (let i = 0; i < numPoints; i++) {
+          const p = pathPoints[i];
+          if (i === 0) ctx1.moveTo(p.x, p.y);
+          else ctx1.lineTo(p.x, p.y);
+        }
+        ctx1.closePath();
+        ctx1.stroke();
+
+        const targetIdx = (Math.floor(kart.sIndex) + offset) % numPoints;
+        const refP = pathPoints[targetIdx];
+        const kappa = pathCurvatures[targetIdx];
+
+        const vTargetDyn = Math.min(vMax, Math.sqrt(ayMax / (kappa + 1e-4)) * 3.5);
+        kart.v += (vTargetDyn - kart.v) * 0.05;
+
+        const pNext = pathPoints[(targetIdx + 1) % numPoints];
+        const refYaw = Math.atan2(pNext.y - refP.y, pNext.x - refP.x);
+        
+        const dx = kart.x - refP.x;
+        const dy = kart.y - refP.y;
+        kart.ey = Math.cos(refYaw) * dy - Math.sin(refYaw) * dx;
+
+        const steerGain = 1.0 / (1.0 + rDelta / 1000.0);
+        const delta = -0.08 * kart.ey * steerGain + (refYaw - kart.yaw) * 0.3;
+
+        kart.yaw += delta * (kart.v / 30.0) * 0.15;
+        kart.x += kart.v * Math.cos(kart.yaw) * 0.12;
+        kart.y += kart.v * Math.sin(kart.yaw) * 0.12;
+
+        let minDist = 999999;
+        let closestIdx = kart.sIndex;
+        for (let i = 0; i < numPoints; i++) {
+          const dist = Math.hypot(kart.x - pathPoints[i].x, kart.y - pathPoints[i].y);
+          if (dist < minDist) {
+            minDist = dist;
+            closestIdx = i;
+          }
+        }
+        kart.sIndex = closestIdx;
+
+        ctx1.beginPath();
+        ctx1.strokeStyle = '#fa709a';
+        ctx1.lineWidth = 2;
+        ctx1.setLineDash([4, 4]);
+        let px = kart.x;
+        let py = kart.y;
+        let pyaw = kart.yaw;
+        ctx1.moveTo(px, py);
+        for (let step = 1; step <= N; step++) {
+          const horizonIdx = (closestIdx + step * 2) % numPoints;
+          const hRefP = pathPoints[horizonIdx];
+          const hNextP = pathPoints[(horizonIdx + 1) % numPoints];
+          const hRefYaw = Math.atan2(hNextP.y - hRefP.y, hNextP.x - hRefP.x);
+
+          pyaw += (hRefYaw - pyaw) * 0.2;
+          px += kart.v * Math.cos(pyaw) * 0.12 * 1.5;
+          py += kart.v * Math.sin(pyaw) * 0.12 * 1.5;
+          ctx1.lineTo(px, py);
+        }
+        ctx1.stroke();
+        ctx1.setLineDash([]);
+
+        ctx1.save();
+        ctx1.translate(kart.x, kart.y);
+        ctx1.rotate(kart.yaw);
+
+        ctx1.fillStyle = '#43e97b';
+        ctx1.shadowColor = 'rgba(67, 233, 123, 0.6)';
+        ctx1.shadowBlur = 12;
+        ctx1.fillRect(-12, -7, 24, 14);
+
+        ctx1.fillStyle = '#ffffff';
+        ctx1.shadowBlur = 0;
+        ctx1.fillRect(6, -9, 6, 3);
+        ctx1.fillRect(6, 6, 6, 3);
+        ctx1.fillRect(-10, -9, 6, 3);
+        ctx1.fillRect(-10, 6, 6, 3);
+
+        ctx1.restore();
+
+        const currentAy = (kart.v * kart.v) * (kappa / 3.5);
+        statAy.textContent = currentAy.toFixed(2);
+        statV.textContent = (kart.v * 3.6 / 3.0).toFixed(1) + ' km/h';
+        statEy.textContent = kart.ey.toFixed(2);
+
+        requestAnimationFrame(animLoop1);
+      }
+
+      updateSliderValues();
+      animLoop1();
+
+      // -------------------------------------------------------------
+      // SIMULATOR 2: GEOMETRIC CANDIDATE FAN VISUALIZER
+      // -------------------------------------------------------------
+      const canvas2 = document.getElementById('fanCanvas');
+      const ctx2 = canvas2.getContext('2d');
+
+      const inputFanEy = document.getElementById('inputFanEy');
+      const inputFanKappa = document.getElementById('inputFanKappa');
+      const inputFanAy = document.getElementById('inputFanAy');
+
+      const valFanEy = document.getElementById('valFanEy');
+      const valFanKappa = document.getElementById('valFanKappa');
+      const valFanAy = document.getElementById('valFanAy');
+
+      const fanPhaseText = document.getElementById('fanPhaseText');
+      const statFanEyCost = document.getElementById('statFanEyCost');
+      const statFanRCost = document.getElementById('statFanRCost');
+      const statFanTotalJ = document.getElementById('statFanTotalJ');
+
+      const btnFanToggle = document.getElementById('btnFanToggle');
+      const btnFanStep = document.getElementById('btnFanStep');
+
+      let isFanPlaying = true;
+      let fanTimer = 0;
+
+      function updateFanControls() {
+        valFanEy.textContent = parseFloat(inputFanEy.value).toFixed(1);
+        valFanKappa.textContent = parseFloat(inputFanKappa.value).toFixed(3);
+        valFanAy.textContent = parseFloat(inputFanAy.value).toFixed(1);
+      }
+
+      [inputFanEy, inputFanKappa, inputFanAy].forEach(el => {
+        el.addEventListener('input', updateFanControls);
+      });
+
+      btnFanToggle.addEventListener('click', () => {
+        isFanPlaying = !isFanPlaying;
+        btnFanToggle.innerHTML = isFanPlaying ? 
+          '<i class="fa-solid fa-pause"></i> 一時停止 / 再生' : 
+          '<i class="fa-solid fa-play"></i> 再生開始';
+      });
+
+      btnFanStep.addEventListener('click', () => {
+        fanTimer = (fanTimer + 30) % 240;
+      });
+
+      function animLoopFan() {
+        ctx2.clearRect(0, 0, canvas2.width, canvas2.height);
+
+        if (isFanPlaying) {
+          fanTimer = (fanTimer + 1) % 240;
+        }
+
+        const eyVal = parseFloat(inputFanEy.value);
+        const kappaVal = parseFloat(inputFanKappa.value);
+        const ayMaxVal = parseFloat(inputFanAy.value);
+
+        const startX = 100;
+        const startY = 220 + eyVal * 30; // カート初期 Y 座標
+        const trackWidth = 140; // コース幅 px
+        const centerLineY = 220; // 参照パス中心
+
+        // 1. コース境界 & ガードレールの描画
+        const roadLength = 550;
+        ctx2.beginPath();
+        ctx2.fillStyle = 'rgba(15, 23, 42, 0.8)';
+        ctx2.fillRect(50, centerLineY - trackWidth/2, roadLength, trackWidth);
+
+        // ガードレール (上下)
+        ctx2.lineWidth = 6;
+        ctx2.strokeStyle = '#ef4444'; // コース外壁
+        ctx2.beginPath();
+        ctx2.moveTo(50, centerLineY - trackWidth/2);
+        ctx2.lineTo(50 + roadLength, centerLineY - trackWidth/2 - kappaVal * 1500);
+        ctx2.moveTo(50, centerLineY + trackWidth/2);
+        ctx2.lineTo(50 + roadLength, centerLineY + trackWidth/2 - kappaVal * 1500);
+        ctx2.stroke();
+
+        // 参照パス (コース中央点線)
+        ctx2.lineWidth = 2;
+        ctx2.strokeStyle = 'rgba(0, 242, 254, 0.6)';
+        ctx2.setLineDash([8, 6]);
+        ctx2.beginPath();
+        ctx2.moveTo(50, centerLineY);
+        ctx2.lineTo(50 + roadLength, centerLineY - kappaVal * 1500);
+        ctx2.stroke();
+        ctx2.setLineDash([]);
+
+        // 2. カート本体の描画
+        ctx2.save();
+        ctx2.translate(startX, startY);
+        ctx2.fillStyle = '#43e97b';
+        ctx2.shadowColor = 'rgba(67, 233, 123, 0.8)';
+        ctx2.shadowBlur = 15;
+        ctx2.fillRect(-15, -10, 30, 20);
+        ctx2.restore();
+
+        // 3. 幾何学的選択肢 (Candidate Trajectory Fan) の生成
+        const numCandidates = 11;
+        const horizonLen = 380;
+        let bestCandidateIdx = -1;
+        let minCost = 999999;
+        let bestEyCost = 0, bestRCost = 0;
+
+        const phase = Math.floor(fanTimer / 80); // 0, 1, 2
+        if (phase === 0) {
+          fanPhaseText.innerHTML = 'Phase 1: 候補軌跡ファン (Candidate Fan) の多展開';
+        } else if (phase === 1) {
+          fanPhaseText.innerHTML = 'Phase 2: 制約フィルター [l, u] (コース壁 & スリップ判定)';
+        } else {
+          fanPhaseText.innerHTML = 'Phase 3: 二次計画法 (OSQP) 最適軌跡 z* の確定！';
+        }
+
+        const candidates = [];
+        for (let c = 0; c < numCandidates; c++) {
+          const steerRatio = (c / (numCandidates - 1)) * 2.0 - 1.0; // -1.0 (最大右) ～ +1.0 (最大左)
+          const pts = [];
+
+          let px = startX;
+          let py = startY;
+          let pyaw = 0;
+          let isCrash = false;
+          let isSlip = false;
+
+          for (let step = 0; step < 20; step++) {
+            pyaw += (steerRatio * 0.08 - kappaVal * 0.5);
+            px += (horizonLen / 20);
+            py += pyaw * (horizonLen / 20);
+
+            // コース壁境界チェック
+            const currentCenterY = centerLineY - (px - 50) * kappaVal * 2.5;
+            const distFromCenter = Math.abs(py - currentCenterY);
+
+            if (distFromCenter > trackWidth / 2 - 10) {
+              isCrash = true;
+            }
+
+            // スリップ横加速度チェック
+            const simulatedAy = Math.abs(steerRatio * 12.0);
+            if (simulatedAy > ayMaxVal) {
+              isSlip = true;
+            }
+
+            pts.push({ x: px, y: py });
+          }
+
+          // コスト評価 calculation
+          const finalPt = pts[pts.length - 1];
+          const finalCenterY = centerLineY - (finalPt.x - 50) * kappaVal * 2.5;
+          const eyCost = 10.0 * Math.pow((finalPt.y - finalCenterY) / 20.0, 2);
+          const rCost = 1.0 * Math.pow(steerRatio * 10, 2);
+          const totalJ = eyCost + rCost;
+
+          if (!isCrash && !isSlip) {
+            if (totalJ < minCost) {
+              minCost = totalJ;
+              bestCandidateIdx = c;
+              bestEyCost = eyCost;
+              bestRCost = rCost;
+            }
+          }
+
+          candidates.push({ pts, isCrash, isSlip, totalJ, steerRatio });
+        }
+
+        // 4. 候補ラインの描画演出
+        candidates.forEach((cand, idx) => {
+          ctx2.beginPath();
+          ctx2.moveTo(startX, startY);
+          cand.pts.forEach(p => ctx2.lineTo(p.x, p.y));
+
+          if (idx === bestCandidateIdx && phase === 2) {
+            // 最適軌跡の輝く太い描画
+            ctx2.lineWidth = 5;
+            ctx2.strokeStyle = '#43e97b';
+            ctx2.shadowColor = 'rgba(67, 233, 123, 1.0)';
+            ctx2.shadowBlur = 18;
+            ctx2.stroke();
+            ctx2.shadowBlur = 0;
+
+            // 最適マーク
+            const lastP = cand.pts[cand.pts.length - 1];
+            ctx2.fillStyle = '#43e97b';
+            ctx2.font = 'bold 16px Inter';
+            ctx2.fillText('✔ 最適解 z*', lastP.x + 10, lastP.y + 5);
+          } else {
+            ctx2.lineWidth = 1.5;
+            if (cand.isCrash) {
+              ctx2.strokeStyle = (phase >= 1) ? 'rgba(239, 68, 68, 0.8)' : 'rgba(255, 255, 255, 0.2)';
+              if (phase >= 1) ctx2.setLineDash([3, 3]);
+            } else if (cand.isSlip) {
+              ctx2.strokeStyle = (phase >= 1) ? 'rgba(255, 183, 3, 0.8)' : 'rgba(255, 255, 255, 0.3)';
+            } else {
+              ctx2.strokeStyle = (phase === 2) ? 'rgba(0, 242, 254, 0.25)' : 'rgba(0, 242, 254, 0.6)';
+            }
+            ctx2.stroke();
+            ctx2.setLineDash([]);
+          }
+        });
+
+        // 最適コストステータス更新
+        statFanEyCost.textContent = bestEyCost.toFixed(2);
+        statFanRCost.textContent = bestRCost.toFixed(2);
+        statFanTotalJ.textContent = minCost < 900000 ? minCost.toFixed(2) : '解不能(Infeasible)';
+
+        requestAnimationFrame(animLoopFan);
+      }
+
+      updateFanControls();
+      animLoopFan();
+    });
+  </script>
+</body>
+</html>

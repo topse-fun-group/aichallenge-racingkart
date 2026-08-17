@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MPC 制御チューニング 設計仕様書 (MPC Control Tuning Specification)</title>
+    <!-- MathJax for rendering LaTeX formulas -->
+    <script>
+        MathJax = {
+            tex: {
+                inlineMath: [['$', '$'], ['\\(', '\\)']],
+                displayMath: [['$$', '$$'], ['\\[', '\\]']]
+            },
+            svg: { fontCache: 'global' }
+        };
+    </script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-dark: #0f172a;
+            --bg-card: #1e293b;
+            --bg-card-hover: #334155;
+            --border-color: #334155;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --accent-blue: #38bdf8;
+            --accent-purple: #818cf8;
+            --accent-green: #34d399;
+            --accent-amber: #fbbf24;
+            --accent-rose: #ef4444;
+            --font-main: 'Inter', system-ui, -apple-system, sans-serif;
+            --font-code: 'JetBrains Mono', monospace;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            background-color: var(--bg-dark);
+            color: var(--text-primary);
+            font-family: var(--font-main);
+            line-height: 1.7;
+            padding: 2rem 1rem;
+        }
+
+        .container { max-width: 1200px; margin: 0 auto; }
+
+        header {
+            background: linear-gradient(135deg, rgba(30, 41, 59, 0.95), rgba(15, 23, 42, 0.95));
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 2.5rem;
+            margin-bottom: 2rem;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+        }
+
+        .header-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            flex-wrap: wrap;
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+
+        h1 {
+            font-size: 2.2rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+            background-clip: text;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 0.5rem;
+        }
+
+        .subtitle { color: var(--text-secondary); font-size: 1.05rem; }
+
+        .badge-group { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+        .badge {
+            padding: 0.35rem 0.8rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+        .badge-green { background: rgba(52, 211, 153, 0.15); color: var(--accent-green); border: 1px solid rgba(52, 211, 153, 0.3); }
+        .badge-blue { background: rgba(56, 189, 248, 0.15); color: var(--accent-blue); border: 1px solid rgba(56, 189, 248, 0.3); }
+        .badge-purple { background: rgba(129, 140, 248, 0.15); color: var(--accent-purple); border: 1px solid rgba(129, 140, 248, 0.3); }
+        .badge-red { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.5); }
+
+        .section-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 2rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+
+        .section-title {
+            font-size: 1.4rem;
+            font-weight: 600;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            color: var(--accent-blue);
+        }
+
+        .section-title::before {
+            content: '';
+            display: inline-block;
+            width: 4px;
+            height: 1.4rem;
+            background: var(--accent-blue);
+            border-radius: 2px;
+        }
+
+        /* Diff Red Highlight Classes */
+        .diff-changed {
+            color: #ef4444 !important;
+            font-weight: 700;
+            background: rgba(239, 68, 68, 0.15);
+            padding: 0.15rem 0.5rem;
+            border-radius: 4px;
+            border: 1px solid rgba(239, 68, 68, 0.4);
+            display: inline-block;
+        }
+
+        .diff-tag-red {
+            background: #ef4444;
+            color: #ffffff;
+            font-size: 0.75rem;
+            font-weight: 700;
+            padding: 0.15rem 0.4rem;
+            border-radius: 3px;
+            margin-right: 0.3rem;
+        }
+
+        .diff-card-red {
+            background: rgba(239, 68, 68, 0.08);
+            border: 2px solid rgba(239, 68, 68, 0.4);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+
+        /* Models */
+        .model-card {
+            background: rgba(15, 23, 42, 0.8);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .model-card h3 {
+            color: var(--accent-purple);
+            font-size: 1.2rem;
+            margin-bottom: 0.8rem;
+        }
+
+        .formula-box {
+            background: #090d16;
+            border-left: 4px solid var(--accent-blue);
+            padding: 1.2rem;
+            border-radius: 8px;
+            margin: 1rem 0;
+            font-size: 1.05rem;
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 1rem;
+            font-size: 0.95rem;
+        }
+
+        th, td {
+            padding: 0.9rem 1.2rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        th {
+            background-color: rgba(15, 23, 42, 0.7);
+            color: var(--accent-blue);
+            font-weight: 600;
+        }
+
+        tr:hover { background-color: rgba(255, 255, 255, 0.02); }
+
+        .code-inline {
+            background: rgba(56, 189, 248, 0.1);
+            color: var(--accent-blue);
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.85em;
+            font-family: var(--font-code);
+        }
+
+        pre {
+            background: #090d16;
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 1.2rem;
+            overflow-x: auto;
+            color: #e2e8f0;
+            font-size: 0.88rem;
+            font-family: var(--font-code);
+        }
+
+        footer {
+            text-align: center;
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            margin-top: 3rem;
+            padding-top: 1.5rem;
+            border-top: 1px solid var(--border-color);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header>
+            <div class="header-top">
+                <div>
+                    <h1>MPC 制御チューニング 設計仕様書</h1>
+                    <div class="subtitle">aichallenge-racingkart / multi_purpose_mpc_ros 運動モデル・制約条件・赤字ハイライト変化点詳解</div>
+                </div>
+                <div class="badge-group">
+                    <span class="badge badge-red">赤字: 今回の変化点</span>
+                    <span class="badge badge-green">SW RULE PASS</span>
+                    <span class="badge badge-blue">MPC MODEL</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Red Highlight Diff Summary -->
+        <div class="diff-card-red">
+            <h3 style="color: #ef4444; font-size: 1.3rem; margin-bottom: 0.8rem; display: flex; align-items: center; gap: 0.5rem;">
+                <span class="diff-tag-red">変化点まとめ</span> 今回のパラメータ変更点一覧 (赤字明記)
+            </h3>
+            <p style="color: var(--text-primary); font-size: 0.95rem; margin-bottom: 1rem;">
+                初期状態からタイム短縮およびS字コーナーの制御平滑化のために書き換えた全項目を<strong>赤字 (<span class="diff-changed">変更後</span>)</strong> で明確化しています。
+            </p>
+            <ul style="list-style: none; padding-left: 0; font-size: 0.95rem;">
+                <li style="margin-bottom: 0.6rem;">
+                    <strong>① 加速度上限 (<span class="code-inline">a_max</span>)</strong>: 2.5 m/s² $\rightarrow$ <span class="diff-changed">1.0 m/s² (SWルール適合へ変更)</span>
+                </li>
+                <li style="margin-bottom: 0.6rem;">
+                    <strong>② 横加速度上限 (<span class="code-inline">ay_max</span>)</strong>: 13.0 m/s² $\rightarrow$ <span class="diff-changed">13.5 m/s² (コーナリングスピード向上)</span>
+                </li>
+                <li style="margin-bottom: 0.6rem;">
+                    <strong>③ コスト行列 (<span class="code-inline">Q, QN</span>)</strong>: [200.0, 1500.0, 100.0] $\rightarrow$ <span class="diff-changed">[400.0, 800.0, 100.0] (過剰切り返し舵角Q_e_psiの抑止)</span>
+                </li>
+                <li style="margin-bottom: 0.6rem;">
+                    <strong>④ 先読み距離 (<span class="code-inline">wp_id_offset</span>)</strong>: 2 $\rightarrow$ <span class="diff-changed">3 (約1.8m手前からのS字スムーズ切り込み)</span>
+                </li>
+                <li style="margin-bottom: 0.6rem;">
+                    <strong>⑤ 曲率予測フラグ (<span class="code-inline">use_max_kappa_pred</span>)</strong>: false $\rightarrow$ <span class="diff-changed">true (曲率急変部での連携有効化)</span>
+                </li>
+                <li style="margin-bottom: 0.4rem;">
+                    <strong>⑥ 各区間目標速度 (<span class="code-inline">ref_vel.yaml</span>)</strong>: 直線 43.0 km/h $\rightarrow$ <span class="diff-changed">45.0 km/h</span>、コーナー 34.0〜38.0 km/h $\rightarrow$ <span class="diff-changed">35.5〜39.5 km/h</span>
+                </li>
+            </ul>
+        </div>
+
+        <!-- Section 1: Beginner Guide & Vehicle Model -->
+        <section class="section-card">
+            <h2 class="section-title">1. 初学者のための MPC (モデル予測制御) と運動モデル解説</h2>
+            <p>
+                MPC (Model Predictive Control) とは、<strong>「車両の物理モデルを使って今後 $N$ ステップ（将来の20地点）の動きをシミュレーションし、最も目標ラインに近く、かつ急ハンドルやスリップを起こさない最適なアクセル・ステアリング操作を毎秒40回（40Hz）計算して実行する制御手法」</strong>です。
+            </p>
+
+            <div class="model-card" style="margin-top: 1.5rem;">
+                <h3>① キネマティック 2 輪モデル (Kinematic Bicycle Model)</h3>
+                <p>
+                    レーシングカートの挙動は、前後輪をそれぞれ1つの車輪にまとめてモデル化した「キネマティック2輪モデル」で定式化されます。
+                </p>
+                <div class="formula-box">
+                    \[
+                    \begin{aligned}
+                    \dot{x} &= v \cos(\psi + \beta) \\
+                    \dot{y} &= v \sin(\psi + \beta) \\
+                    \dot{\psi} &= \frac{v}{L} \sin \delta
+                    \end{aligned}
+                    \]
+                </div>
+                <p style="font-size: 0.95rem; color: var(--text-secondary);">
+                    ここで、$x, y$ は車両位置、$\psi$ は車両の向き（ヨー角）、$v$ は車速、$L$ はホイールベース (1.087m)、$\delta$ は前輪ステアリング角、$\beta$ はすべり角です。
+                </p>
+            </div>
+
+            <div class="model-card">
+                <h3>② 制御目的とコスト関数 $J$ の仕組み</h3>
+                <p>
+                    MPCは以下の目的関数（コスト関数 $J$）を最小化するように二次計画法 (OSQPソルバ) を用いて毎周期最適化計算を行います：
+                </p>
+                <div class="formula-box">
+                    \[
+                    J = \sum_{k=1}^{N} \left( Q_y \cdot e_{y,k}^2 + Q_\psi \cdot e_{\psi,k}^2 + Q_v \cdot (v_k - v_{\text{ref},k})^2 + R_v \cdot a_k^2 + R_\delta \cdot \delta_k^2 \right)
+                    \]
+                </div>
+                <p style="font-size: 0.95rem; color: var(--text-secondary);">
+                    ・$e_y$: 横偏差（目標ラインと車両中心の横方向のズレ $[m]$）<br>
+                    ・$e_\psi$: 方位角偏差（目標ラインの進行方向と車両の向きの角度差 $[\text{rad}]$）<br>
+                    ・$Q_y, Q_\psi, Q_v$: 各偏差に対する重みペナルティ<br>
+                    ・$R_v, R_\delta$: 加速度 $a$ およびステアリング角 $\delta$ の変化率に対するペナルティ
+                </p>
+            </div>
+        </section>
+
+        <!-- Section 2: SW Competition Rule Compliance -->
+        <section class="section-card">
+            <h2 class="section-title">2. SW部門競技ルールと物理制約のモデル表現</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>競技ルール制約項目</th>
+                        <th>数式・物理モデル表現</th>
+                        <th>設定値と変更点 (赤字)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>① 加速度上限の制限</strong></td>
+                        <td>$$a_{\text{cmd}} \le a_{\text{max}} = 1.0 \, \text{m/s}^2$$</td>
+                        <td>初期値 2.5 m/s² $\rightarrow$ <span class="diff-changed">1.0 m/s² (赤字変更)</span>。<br>1.0 m/s² を超える入力を受けると物理シミュレータ側でペナルティ（一定時間の速度制限）が科されるため上限値 1.0 m/s² に厳格設定。</td>
+                    </tr>
+                    <tr>
+                        <td><strong>② コーナリング横加速度限界</strong></td>
+                        <td>$$a_y = \frac{v^2}{R} = v^2 \cdot \kappa \le ay_{\text{max}}$$</td>
+                        <td>初期値 13.0 m/s² $\rightarrow$ <span class="diff-changed">13.5 m/s² (赤字変更)</span>。<br>コーナー曲率 $\kappa$ に対してタイヤのグリップ限界内でコーナリングスピードを高めるため最適化。</td>
+                    </tr>
+                    <tr>
+                        <td><strong>③ 直線・コーナー目標速度</strong></td>
+                        <td>$$v_{\text{ref}}(s) \le v_{\text{max}} = 45.0 \, \text{km/h}$$</td>
+                        <td>初期値 43.0 km/h $\rightarrow$ <span class="diff-changed">45.0 km/h (赤字変更)</span>。<br>直線最高速を 45.0 km/h、コーナーボトム速度を 35.5〜39.5 km/h にチューニング。</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Section 3: S-Curve Smoothness Optimization -->
+        <section class="section-card">
+            <h2 class="section-title">3. 特有区間 (S字コーナー) における挙動平滑化チューニング詳解</h2>
+            <p style="margin-bottom: 1rem;">
+                ユーザー指摘エリア <strong>(X: 89620〜89640, Y: 43180〜43190)</strong> は、曲率 $\kappa$ が正（左カーブ）から負（右カーブ）へ急速に反転する <strong>S字切り返し区間 (<span class="code-inline">wp_id: 165〜185</span>)</strong> です。
+            </p>
+
+            <div style="margin-top: 1.5rem;">
+                <h3 style="color: var(--accent-purple); font-size: 1.1rem; margin-bottom: 1rem;">パラメータ変更点一覧 (<span class="code-inline">config.yaml</span>)</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>パラメータ</th>
+                            <th>変更前</th>
+                            <th>変更後 (赤字ハイライト)</th>
+                            <th>初学者向けモデル説明・役割</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="code-inline">Q</span> (状態重み)</td>
+                            <td><span class="code-inline">[200.0, 1500.0, 100.0]</span></td>
+                            <td><span class="diff-changed">[400.0, 800.0, 100.0]</span></td>
+                            <td>$e_y$ (横偏差) と $e_\psi$ (方位偏差) の重視度バランス。$Q_\psi$ を下げることで過剰切り返し舵角を抑止。</td>
+                        </tr>
+                        <tr>
+                            <td><span class="code-inline">QN</span> (終端状態重み)</td>
+                            <td><span class="code-inline">[200.0, 1500.0, 100.0]</span></td>
+                            <td><span class="diff-changed">[400.0, 800.0, 100.0]</span></td>
+                            <td>予測ステップの最後 ($N=20$) での偏差重み。$Q$ と合わせることで終端での舵角暴れを抑止。</td>
+                        </tr>
+                        <tr>
+                            <td><span class="code-inline">wp_id_offset</span></td>
+                            <td><span class="code-inline">2</span> (約1.2m)</td>
+                            <td><span class="diff-changed">3 (約1.8m)</span></td>
+                            <td>先読み距離。値を大きくするとS字コーナーの手前から余裕を持って滑らかに切り込みを開始。</td>
+                        </tr>
+                        <tr>
+                            <td><span class="code-inline">use_max_kappa_pred</span></td>
+                            <td><span class="code-inline">false</span></td>
+                            <td><span class="diff-changed">true</span></td>
+                            <td>将来の最大曲率 $\kappa_{\text{max}}$ を予測してスムーズに速度・ステアリングを繋ぐ機能を有効化。</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Section 4: Speed Profile Table -->
+        <section class="section-card">
+            <h2 class="section-title">4. 区間別目標速度テーブル (<span class="code-inline">ref_vel.yaml</span>)</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>セクション名</th>
+                        <th>wp_id</th>
+                        <th>変更前速度</th>
+                        <th>変更後速度 $v_{\text{ref}}$ (赤字ハイライト)</th>
+                        <th>制御的理由</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>s0, s2, s4, s6, s11, s14 (直線)</td>
+                        <td>1, 85, 135, 190, 300, 340</td>
+                        <td>43.0 km/h</td>
+                        <td><span class="diff-changed">45.0 km/h</span></td>
+                        <td>$a \le 1.0\,\text{m/s}^2$ 制約下での直線最高速度の向上</td>
+                    </tr>
+                    <tr>
+                        <td>s1_corner1 (高速コーナー)</td>
+                        <td>60</td>
+                        <td>38.0 km/h</td>
+                        <td><span class="diff-changed">39.5 km/h</span></td>
+                        <td>コーナーアペックスでのボトムスピード維持</td>
+                    </tr>
+                    <tr>
+                        <td>s3_hairpin1 (ヘアピン)</td>
+                        <td>110</td>
+                        <td>35.0 km/h</td>
+                        <td><span class="diff-changed">36.5 km/h</span></td>
+                        <td>ヘアピン脱出速度の落ち込み防止</td>
+                    </tr>
+                    <tr>
+                        <td>s5, s7, s12, s13 (中速コーナー)</td>
+                        <td>160, 210, 305, 325</td>
+                        <td>36.0 km/h</td>
+                        <td><span class="diff-changed">37.5 km/h</span></td>
+                        <td>横加速度 $ay_{\text{max}}=13.5\,\text{m/s}^2$ 範囲内でのコーナリング向上</td>
+                    </tr>
+                    <tr>
+                        <td>s8, s9, s10 (シケイン)</td>
+                        <td>225, 240, 260</td>
+                        <td>34.0〜35.0 km/h</td>
+                        <td><span class="diff-changed">35.5〜36.5 km/h</span></td>
+                        <td>S字切り返し中の不要な速度ドロップ防止</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <footer>
+            Autoware Racing Kart Challenge - MPC Control Tuning Specification
+        </footer>
+    </div>
+</body>
+</html>
