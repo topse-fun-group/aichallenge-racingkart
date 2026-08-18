@@ -225,26 +225,35 @@ class FollowPathState(DrivingState):
 
 
 class RecoveryState(DrivingState):
-    """Recovery after collision: wait → back up → rejoin path.
+    """3-Phase Recovery: wait (0.5s) -> directional back (3.0s) -> directional forward turn (2.0s) -> follow_path.
 
     Sequence
     --------
-    1. **wait** (``WAIT_DURATION`` seconds): full stop.
-    2. **back**: reverse at gentle speed (gear=REVERSE) until path deviation is small enough
-       or ``MAX_BACK_DURATION`` elapses.
-    3. Transition to ``follow_path``.
+    1. **wait** (``WAIT_DURATION`` = 0.5s): full stop, records collision side (left ey>=0 or right ey<0).
+    2. **back** (``BACK_DURATION`` = 3.0s): reverse (gear=REVERSE) with directional steering:
+       - Left collision (left on track): steer LEFT (+0.55 rad) while reversing.
+       - Right collision (right on track): steer RIGHT (-0.55 rad) while reversing.
+    3. **forward_turn** (``FORWARD_TURN_DURATION`` = 2.0s): forward drive (gear=DRIVE) with directional steering:
+       - Left collision (left on track): steer RIGHT (-0.55 rad) to point nose towards track right.
+       - Right collision (right on track): steer LEFT (+0.55 rad) to point nose towards track left.
+    4. Transition to ``follow_path``.
     """
 
     WAIT_DURATION = 0.5          # [s] (停止待機)
-    BACK_SPEED = -3.5            # [m/s] (後退速度)
-    BACK_ACCEL = 3.0             # [m/s^2] (正の絶対値でスロットルを要求)
-    MIN_BACK_DURATION = 1.5      # [s] (最低1.5秒はバックを継続してチャタリング防止)
-    MAX_BACK_DURATION = 3.5      # [s] (最大バック時間)
-    PATH_DEVIATION_THRESHOLD = 1.0  # [m] — threshold to rejoin
+    BACK_DURATION = 2.0          # [s] (最大2秒バック)
+    FORWARD_TURN_DURATION = 2.0  # [s] (最大2秒前進)
+
+    BACK_SPEED = -4.0            # [m/s] (後退速度)
+    FORWARD_TURN_SPEED = 3.5     # [m/s] (前進旋回速度)
+    BACK_ACCEL = 3.5             # [m/s^2]
+    FORWARD_ACCEL = 3.0          # [m/s^2]
+
+    STEER_LOCK = 0.55            # [rad] (大舵角ステアリング)
 
     def __init__(self) -> None:
         self._enter_time: Optional[float] = None
-        self._phase: str = "wait"          # "wait" | "back"
+        self._phase: str = "wait"          # "wait" | "back" | "forward_turn"
+        self._collision_side: str = "left"  # "left" | "right"
 
     @property
     def name(self) -> str:
@@ -275,6 +284,8 @@ class RecoveryState(DrivingState):
     def on_enter(self, ctx: StateContext) -> None:
         self._enter_time = ctx.current_time_sec
         self._phase = "wait"
+        # 衝突時の軌道横偏差: 左側(ey >= 0)か右側(ey < 0)かを記録
+        self._collision_side = "left" if ctx.path_e_y >= 0 else "right"
 
     def on_exit(self, ctx: StateContext) -> None:
         self._enter_time = None
@@ -293,16 +304,14 @@ class RecoveryState(DrivingState):
                 self._phase = "back"
             return None  # stay in recovery while waiting
 
-        # phase == "back"
-        back_elapsed = elapsed - self.WAIT_DURATION
-
-        # Enforce minimum back duration to prevent instant exit / chattering
-        if back_elapsed < self.MIN_BACK_DURATION:
+        if self._phase == "back":
+            if elapsed >= (self.WAIT_DURATION + self.BACK_DURATION):
+                self._phase = "forward_turn"
             return None
 
-        if ctx.path_deviation < self.PATH_DEVIATION_THRESHOLD:
-            return "follow_path"
-        if back_elapsed >= self.MAX_BACK_DURATION:
+        # phase == "forward_turn"
+        total_recovery_duration = self.WAIT_DURATION + self.BACK_DURATION + self.FORWARD_TURN_DURATION
+        if elapsed >= total_recovery_duration:
             return "follow_path"
 
         return None
@@ -315,24 +324,17 @@ class RecoveryState(DrivingState):
         if self._phase == "wait":
             return (0.0, 0.0, 0.0)  # full stop
 
-        # Steering while reversing: turn nose to face parallel + 10 deg towards the raceline
-        TARGET_ANGLE_OFFSET = np.deg2rad(20.0)  # 10 degrees in radians
-        if ctx.path_e_y >= 0:
-            # Vehicle is to the left of the path -> point nose right (-10 deg relative to path)
-            target_psi = ctx.path_psi + TARGET_ANGLE_OFFSET
-        else:
-            # Vehicle is to the right of the path -> point nose left (+10 deg relative to path)
-            target_psi = ctx.path_psi - TARGET_ANGLE_OFFSET
+        if self._phase == "back":
+            # 1. 軌道の左側にいるとき: ステアリングを左に切ってバック (+0.55 rad)
+            # 2. 軌道の右側にいるとき: ステアリングを右に切ってバック (-0.55 rad)
+            steer_cmd = self.STEER_LOCK if self._collision_side == "left" else -self.STEER_LOCK
+            return (self.BACK_SPEED, steer_cmd, self.BACK_ACCEL)
 
-        # Normalized yaw error [-pi, pi]
-        psi_err = (ctx.pose_theta - target_psi + np.pi) % (2 * np.pi) - np.pi
-
-        # P-control for reverse steering
-        # psi_err > 0 (nose too far left) -> turn right (steer > 0) to rotate nose right
-        K_P = 1.2
-        steer_cmd = float(np.clip(K_P * psi_err, -0.55, 0.55))
-
-        return (self.BACK_SPEED, steer_cmd, self.BACK_ACCEL)
+        # phase == "forward_turn" (前進旋回)
+        # 1. 軌道の左側にいたとき: 姿勢が右側に向いて前進 (-0.55 rad)
+        # 2. 軌道の右側にいたとき: 姿勢が左側に向いて前進 (+0.55 rad)
+        steer_cmd = -self.STEER_LOCK if self._collision_side == "left" else self.STEER_LOCK
+        return (self.FORWARD_TURN_SPEED, steer_cmd, self.FORWARD_ACCEL)
 
 
 # ---------------------------------------------------------------------------
