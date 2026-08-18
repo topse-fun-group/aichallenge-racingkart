@@ -1185,7 +1185,7 @@ class MPCController(Node):
             is_colliding = False
             if self._last_colliding_time is not None:
                 elapsed_from_last_colliding = (now - self._last_colliding_time).nanoseconds / 1e9
-                if elapsed_from_last_colliding < 5.0:
+                if elapsed_from_last_colliding < 2.5: # 2.5
                     is_colliding = True
 
             pose = odom_to_pose_2d(self._odom) # type: ignore

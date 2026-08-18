@@ -235,7 +235,7 @@ class RecoveryState(DrivingState):
     3. Transition to ``follow_path``.
     """
 
-    WAIT_DURATION = 1.0          # [s] (停止待機)
+    WAIT_DURATION = 0.5          # [s] (停止待機)
     BACK_SPEED = -3.5            # [m/s] (後退速度)
     BACK_ACCEL = 3.0             # [m/s^2] (正の絶対値でスロットルを要求)
     MIN_BACK_DURATION = 1.5      # [s] (最低1.5秒はバックを継続してチャタリング防止)
@@ -316,13 +316,13 @@ class RecoveryState(DrivingState):
             return (0.0, 0.0, 0.0)  # full stop
 
         # Steering while reversing: turn nose to face parallel + 10 deg towards the raceline
-        TARGET_ANGLE_OFFSET = np.deg2rad(10.0)  # 10 degrees in radians
+        TARGET_ANGLE_OFFSET = np.deg2rad(20.0)  # 10 degrees in radians
         if ctx.path_e_y >= 0:
             # Vehicle is to the left of the path -> point nose right (-10 deg relative to path)
-            target_psi = ctx.path_psi - TARGET_ANGLE_OFFSET
+            target_psi = ctx.path_psi + TARGET_ANGLE_OFFSET
         else:
             # Vehicle is to the right of the path -> point nose left (+10 deg relative to path)
-            target_psi = ctx.path_psi + TARGET_ANGLE_OFFSET
+            target_psi = ctx.path_psi - TARGET_ANGLE_OFFSET
 
         # Normalized yaw error [-pi, pi]
         psi_err = (ctx.pose_theta - target_psi + np.pi) % (2 * np.pi) - np.pi
@@ -342,9 +342,9 @@ class RecoveryState(DrivingState):
 class FollowState(DrivingState):
     """Follow a leading vehicle — maintain safe distance (8m), match speed."""
 
-    TARGET_FOLLOWING_DISTANCE = 7.0   # [m] (相対距離保持目標)
-    STOP_DISTANCE = 3.5               # [m] (完全停止・ブレーキ閾値、遅延を考慮)
-    FOLLOWING_KP = 0.5                # speed adjustment gain
+    TARGET_FOLLOWING_DISTANCE = 2.5   # [m] (相対距離保持目標)
+    STOP_DISTANCE = 1.0               # [m] (完全停止・ブレーキ閾値、遅延を考慮)
+    FOLLOWING_KP = 1.3                # speed adjustment gain
 
     # ---- MPC parameters (same cornering capability as FollowPathState) ------
     _V_MAX_DEFAULT = 35.0   # [km/h] — ceiling, actual v_max is dynamic
@@ -356,8 +356,8 @@ class FollowState(DrivingState):
     R = [100_000.0, 100.0]
     QN = [1_000_000.0, 1_000.0, 10_000.0]
 
-    VEHICLE_DETECT_DISTANCE = 12.0
-    MIN_OVERTAKE_WIDTH = 1.6  # minimum available width to execute overtake [m]
+    VEHICLE_DETECT_DISTANCE = 2.5
+    MIN_OVERTAKE_WIDTH = 1.4  # minimum available width to execute overtake [m]
 
     CLEAR_HYSTERESIS_SEC = 1.5  # Must remain clear for 1.5 seconds continuously before returning to follow_path
 
