@@ -16,7 +16,7 @@ from multi_purpose_mpc_ros_with_dynamic_param.common import convert_to_namedtupl
 
 
 class ReferencePathGenerator():
-    PKG_PATH: str = get_package_share_directory('multi_purpose_mpc_ros') + "/"
+    PKG_PATH: str = get_package_share_directory('multi_purpose_mpc_ros_with_dynamic_param') + "/"
 
     @classmethod
     def __new__(cls, *args, **kwargs):

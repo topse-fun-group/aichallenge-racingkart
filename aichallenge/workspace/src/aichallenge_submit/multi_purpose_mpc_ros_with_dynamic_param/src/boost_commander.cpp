@@ -1,6 +1,6 @@
 #include "multi_purpose_mpc_ros_with_dynamic_param/boost_commander.hpp"
 
-namespace roborovsky::multi_purpose_mpc_ros {
+namespace roborovsky::multi_purpose_mpc_ros_with_dynamic_param {
 
 // Public methods
 
@@ -46,4 +46,4 @@ void BoostCommander::commandCallback(
   command_ = *msg;
 }
 
-} // namespace roborovsky::multi_purpose_mpc_ros
+} // namespace roborovsky::multi_purpose_mpc_ros_with_dynamic_param

@@ -101,7 +101,7 @@ def predictions_to_obstacles(predictions, vehicle_radius: float, obstacle_cls=No
     dataclass.
     """
     if obstacle_cls is None:
-        from multi_purpose_mpc_ros.core.map import Obstacle as obstacle_cls
+        from multi_purpose_mpc_ros_with_dynamic_param.core.map import Obstacle as obstacle_cls
     out = []
     for _vid, points in predictions.items():
         for x, y in points:
