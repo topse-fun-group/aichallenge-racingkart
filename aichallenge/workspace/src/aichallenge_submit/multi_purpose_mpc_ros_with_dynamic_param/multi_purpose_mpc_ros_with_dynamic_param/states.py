@@ -363,10 +363,14 @@ class FollowState(DrivingState):
     AY_MAX = 9.5
     # Q[0]=e_y (lateral), Q[1]=e_psi (heading), Q[2]=t (speed tracking)
     # Same as FollowPathState to maintain identical corner-tracking ability
-    Q = [1_000_000.0, 100_000_000.0, 850_000.0]
+    # Q = [1_000_000.0, 100_000_000.0, 850_000.0]
     # R[0]=v, R[1]=delta (steering) — R[1]=100 to allow full steering in corners
-    R = [100_000.0, 100.0]
-    QN = [1_000_000.0, 1_000.0, 10_000.0]
+    # R = [100_000.0, 100.0]
+    # QN = [1_000_000.0, 1_000.0, 10_000.0]
+    # ---
+    Q  = [1_000_000_000.0, 500_000_000.0, 100_000.0]
+    R  = [1_000_000.0, 500_000_000.0]
+    QN = [1_000_000.0, 5_000.0, 10_000.0]
 
     VEHICLE_DETECT_DISTANCE = 2.5
     MIN_OVERTAKE_WIDTH = 1.4  # minimum available width to execute overtake [m]

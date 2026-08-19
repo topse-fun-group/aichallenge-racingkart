@@ -1306,8 +1306,38 @@ class MPCController(Node):
                 acc = np.clip(acc, self._mpc_cfg.a_min, self._mpc_cfg.a_max)
 
             # FollowState: Limit positive acceleration to prevent rear-end collisions due to latency
+            # if isinstance(current_state, FollowState):
+            #     acc = np.clip(acc, self._mpc_cfg.a_min, 1.0)  # max 1.0 m/s² (half of a_max)
             if isinstance(current_state, FollowState):
                 acc = np.clip(acc, self._mpc_cfg.a_min, 1.0)  # max 1.0 m/s² (half of a_max)
+                # Waypoint-relative heading error [-pi, pi] and lateral error [m]
+                e_psi = (pose.theta - ctx.path_psi + np.pi) % (2 * np.pi) - np.pi
+                e_y = ctx.path_e_y  # Left > 0, Right < 0
+                dt_safe = max(dt, 0.001)
+
+                # Derivative terms (rate of error change)
+                d_e_y = (e_y - self._follow_prev_e_y) / dt_safe
+                d_e_psi = (e_psi - self._follow_prev_e_psi) / dt_safe
+
+                # Store previous errors
+                self._follow_prev_e_y = e_y
+                self._follow_prev_e_psi = e_psi
+
+                # PD Gains:
+                # P: restores position & heading to waypoint center
+                # D: provides proactive counter-steering & damping when crossing center line (prevents wall overshoot)
+                KP_Y, KD_Y = 0.35, 0.12
+                KP_PSI, KD_PSI = 0.70, 0.20
+
+                pd_y = KP_Y * e_y + KD_Y * d_e_y
+                pd_psi = KP_PSI * e_psi + KD_PSI * d_e_psi
+
+                steer_correction = float(np.clip(-(pd_y + pd_psi), -np.deg2rad(12.0), np.deg2rad(12.0)))
+                u[1] += steer_correction
+            else:
+                # Reset memory when outside FollowState
+                self._follow_prev_e_y = 0.0
+                self._follow_prev_e_psi = 0.0
 
             # Apply low pass filter to control signal (agile high gain 0.85 during OvertakeState for quick avoidance)
             steer_gain = 0.85 if isinstance(current_state, OvertakeState) else self._mpc_cfg.steer_low_pass_gain
