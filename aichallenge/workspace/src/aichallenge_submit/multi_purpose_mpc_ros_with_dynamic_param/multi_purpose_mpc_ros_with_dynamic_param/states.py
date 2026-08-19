@@ -35,7 +35,7 @@ except ImportError:
 # Stuck detection constants (shared by all states)
 # ---------------------------------------------------------------------------
 STUCK_VELOCITY_THRESHOLD = 0.3  # [m/s] — below this is considered "stopped"
-STUCK_DURATION = 8.0            # [s] — stopped 8s triggers recovery (prevents startup false-alarm)
+STUCK_DURATION = 2.0            # [s] — stopped 8s triggers recovery (prevents startup false-alarm)
 
 
 # ---------------------------------------------------------------------------

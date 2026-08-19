@@ -1065,10 +1065,10 @@ class MPCController(Node):
 
         # Cooldown check: 10.0s after startup or 5.0s after exiting RecoveryState
         is_cooldown = False
-        if (now_sec - self._start_time) < 10.0:
+        if (now_sec - self._start_time) < 2.0: # 10.0
             is_cooldown = True
         if self._last_recovery_exit_time is not None:
-            if (now_sec - self._last_recovery_exit_time) < 5.0:
+            if (now_sec - self._last_recovery_exit_time) < 2.0: # 5.0
                 is_cooldown = True
 
         # Closest waypoint orientation & signed lateral distance
