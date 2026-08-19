@@ -21,6 +21,7 @@ import numpy as np
 class ControlMode(Enum):
     PURE_PURSUIT = auto()
     MPC = auto()
+    WAYPOINT_SHIFT_PURE_PURSUIT = auto()
     OVERRIDE = auto()
 
 try:
@@ -172,8 +173,8 @@ class FollowPathState(DrivingState):
     QN = [1_000_000.0, 1_000.0, 10_000.0]
 
     # ---- forward-vehicle detection thresholds -------------------------------
-    VEHICLE_DETECT_DISTANCE = 8.0   # [m]
-    MIN_OVERTAKE_WIDTH = 1.4         # minimum available width to execute overtake [m]
+    VEHICLE_DETECT_DISTANCE = 12.0  # [m]
+    MIN_OVERTAKE_WIDTH = 1.0        # minimum available width to execute overtake [m]
 
     @property
     def name(self) -> str:
@@ -211,21 +212,14 @@ class FollowPathState(DrivingState):
         if has_any_obstacle:
             max_side = max(ctx.overtake_width_left, ctx.overtake_width_right)
             has_clearance = max_side >= self.MIN_OVERTAKE_WIDTH
-            # is_zero_speed = (ctx.forward_vehicle_speed is not None and ctx.forward_vehicle_speed < 0.3)
-            # is_not_aligned = (ctx.forward_vehicle_heading_diff > np.deg2rad(45.0))
             is_slower_leader = (
-                ctx.forward_vehicle_speed is None #
-                or (
-                    ctx.forward_vehicle_speed < 2.77 # 10 km/h = 2.77 m/s
-                        # and ctx.velocity - ctx.forward_vehicle_speed >= 4.17 # 4.17 m/s = 15 km/h speed difference threshold for overtaking
-                )
+                ctx.forward_vehicle_speed is None
+                or ctx.forward_vehicle_speed < 5.56  # < 20 km/h
+                or (ctx.velocity - ctx.forward_vehicle_speed >= 1.5)  # ego is faster by >= 1.5 m/s (5.4 km/h)
             )
-            # is_aligned = (ctx.forward_vehicle_heading_diff <= np.deg2rad(45.0))
             is_clear_side = not ctx.has_side_vehicle
 
-            # (1) Overtake if clearance exists AND (leader is stopped OR leader heading is NOT aligned OR side-by-side)
-            # (2) Follow if no clearance OR leader is aligned and moving
-            # if has_clearance and (is_zero_speed or is_not_aligned or ctx.has_side_vehicle):
+            # Overtake if clearance exists AND leader is slower/approaching AND side is clear
             if has_clearance and is_slower_leader and is_clear_side:
                 return "overtake"
             else:
@@ -372,8 +366,8 @@ class FollowState(DrivingState):
     R  = [1_000_000.0, 500_000_000.0]
     QN = [1_000_000.0, 5_000.0, 10_000.0]
 
-    VEHICLE_DETECT_DISTANCE = 2.5
-    MIN_OVERTAKE_WIDTH = 1.4  # minimum available width to execute overtake [m]
+    VEHICLE_DETECT_DISTANCE = 12.0
+    MIN_OVERTAKE_WIDTH = 1.0  # minimum available width to execute overtake [m]
 
     CLEAR_HYSTERESIS_SEC = 1.5  # Must remain clear for 1.5 seconds continuously before returning to follow_path
 
@@ -415,20 +409,14 @@ class FollowState(DrivingState):
 
         max_side = max(ctx.overtake_width_left, ctx.overtake_width_right)
         has_clearance = max_side >= self.MIN_OVERTAKE_WIDTH
-        # is_zero_speed = (ctx.forward_vehicle_speed is not None and ctx.forward_vehicle_speed < 0.3)
-        # is_not_aligned = (ctx.forward_vehicle_heading_diff > np.deg2rad(45.0))
         is_slower_leader = (
-            ctx.forward_vehicle_speed is None #
-            or (
-                ctx.forward_vehicle_speed < 2.77 # 10 km/h = 2.77 m/s
-                # and ctx.velocity - ctx.forward_vehicle_speed >= 4.17 # 4.17 m/s = 15 km/h speed difference threshold for overtaking
-            )
+            ctx.forward_vehicle_speed is None
+            or ctx.forward_vehicle_speed < 5.56  # < 20 km/h
+            or (ctx.velocity - ctx.forward_vehicle_speed >= 1.5)  # ego is faster by >= 1.5 m/s (5.4 km/h)
         )
-        # is_aligned = (ctx.forward_vehicle_heading_diff <= np.deg2rad(45.0))
         is_clear_side = not ctx.has_side_vehicle
 
-        # Switch to Overtake if clearance exists AND (leader is stopped OR leader heading is NOT aligned OR side-by-side)
-        # if has_clearance and (is_zero_speed or is_not_aligned or ctx.has_side_vehicle):
+        # Switch to Overtake if clearance exists AND leader is slower/approaching AND side is clear
         if has_clearance and is_slower_leader and is_clear_side:
             return "overtake"
 
@@ -490,6 +478,7 @@ class OvertakeState(DrivingState):
     QN = [4_000_000.0, 1_000.0, 10_000.0]
 
     VEHICLE_DETECT_DISTANCE = 6.0
+    USE_MPC_OVERTAKE: bool = False  # False: Waypoint-Shift Pure Pursuit (Default), True: MPC
 
     def __init__(self) -> None:
         self._overtake_side: str = "left"  # "left" or "right"
@@ -499,6 +488,11 @@ class OvertakeState(DrivingState):
     @property
     def name(self) -> str:
         return "overtake"
+
+    @property
+    def control_mode(self) -> ControlMode:
+        """Control mode: Waypoint-shifted Pure Pursuit by default, switchable to MPC."""
+        return ControlMode.MPC if self.USE_MPC_OVERTAKE else ControlMode.WAYPOINT_SHIFT_PURE_PURSUIT
 
     def get_params(self) -> MPCStateParams:
         return MPCStateParams(

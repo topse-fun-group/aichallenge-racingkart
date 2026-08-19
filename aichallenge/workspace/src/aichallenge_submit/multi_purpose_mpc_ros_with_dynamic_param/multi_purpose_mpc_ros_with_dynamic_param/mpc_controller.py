@@ -898,6 +898,91 @@ class MPCController(Node):
             self.get_logger().error(f"Error in pure pursuit calculation (fallback to default speed): {e}")
             return default_speed, 0.0
 
+    def _compute_waypoint_shift_pure_pursuit_control(
+        self, pose, v_current: float, ctx: StateContext
+    ) -> Tuple[float, float]:
+        """Compute (target_speed_mps, steer_cmd) using Pure Pursuit on shifted waypoints for overtaking."""
+        target_speed_mps = kmh_to_m_per_sec(35.0)
+        if pose is None or self._waypoint_xy is None or len(self._waypoint_xy) == 0:
+            return target_speed_mps, 0.0
+
+        try:
+            pp = getattr(self._cfg, "pure_pursuit", None)
+            wheel_base = float(getattr(pp, "wheel_base", 1.087)) if pp else 1.087
+            lookahead_gain = float(getattr(pp, "lookahead_gain", 0.25)) if pp else 0.25
+            lookahead_min = float(getattr(pp, "lookahead_min_distance", 2.0)) if pp else 2.0
+            steer_gain = float(getattr(pp, "steering_tire_angle_gain", 1.0)) if pp else 1.0
+
+            car_xy = np.array([pose.x, pose.y], dtype=np.float64)
+            diffs = self._waypoint_xy - car_xy
+            dists_sq = np.einsum("ij,ij->i", diffs, diffs)
+            closest_idx = int(np.argmin(dists_sq))
+
+            # Sync wp_id for velocity configulator compatibility
+            if hasattr(self._mpc, "model") and hasattr(self._mpc.model, "wp_id"):
+                self._mpc.model.wp_id = closest_idx
+
+            # Determine lateral offset d_offset (center of available width: width / 2)
+            is_left = (ctx.overtake_width_left >= ctx.overtake_width_right)
+            if is_left:
+                half_w = ctx.overtake_width_left / 2.0
+                d_offset = float(np.clip(half_w, 1.0, 2.2))
+            else:
+                half_w = ctx.overtake_width_right / 2.0
+                d_offset = -float(np.clip(half_w, 1.0, 2.2))
+
+            # Shift forward N waypoints using Hann window for smooth S-curve
+            N_SHIFT = 35
+            wps = self._reference_path.waypoints
+            n_wps = len(wps)
+
+            lookahead_distance = lookahead_gain * target_speed_mps + lookahead_min
+            rear_x = pose.x - (wheel_base / 2.0) * np.cos(pose.theta)
+            rear_y = pose.y - (wheel_base / 2.0) * np.sin(pose.theta)
+
+            target_shifted_x = rear_x
+            target_shifted_y = rear_y
+            found_lookahead = False
+
+            for i in range(n_wps):
+                idx = (closest_idx + i) % n_wps
+                wp = wps[idx]
+                psi = float(wp.psi)
+
+                # Hann window weighting for the first N_SHIFT waypoints
+                if i < N_SHIFT:
+                    weight = float(np.sin(np.pi * i / N_SHIFT) ** 2)
+                else:
+                    weight = 0.0
+
+                # Normal offset: (-sin(psi), cos(psi))
+                shift_x = wp.x + weight * d_offset * (-np.sin(psi))
+                shift_y = wp.y + weight * d_offset * np.cos(psi)
+
+                if np.hypot(shift_x - rear_x, shift_y - rear_y) >= lookahead_distance:
+                    target_shifted_x = shift_x
+                    target_shifted_y = shift_y
+                    found_lookahead = True
+                    break
+
+            if not found_lookahead:
+                # Fallback to closest shifted waypoint
+                target_shifted_x = wps[closest_idx].x
+                target_shifted_y = wps[closest_idx].y
+
+            alpha = np.arctan2(target_shifted_y - rear_y, target_shifted_x - rear_x) - pose.theta
+            alpha = (alpha + np.pi) % (2 * np.pi) - np.pi
+
+            steering_tire_angle = steer_gain * np.arctan2(
+                2.0 * wheel_base * np.sin(alpha), lookahead_distance
+            )
+            steer_cmd = float(np.clip(steering_tire_angle, -0.55, 0.55))
+
+            return target_speed_mps, steer_cmd
+        except Exception as e:
+            self.get_logger().error(f"Error in waypoint-shift pure pursuit overtake: {e}")
+            return target_speed_mps, 0.0
+
     def _compute_path_deviation(self) -> float:
         """Approximate lateral deviation from the reference path [m]."""
         car_xy = np.array(
@@ -1251,9 +1336,13 @@ class MPCController(Node):
                 self._sim_logger.plot_animation(t, self._loop, self._current_laps, self._lap_times, is_colliding, u, self._mpc, self._car)
                 return
 
-            # ---- Control Selection (Hybrid: Pure Pursuit for FollowPathState, MPC for Follow/Overtake) ----
+            # ---- Control Selection (Hybrid: Pure Pursuit for FollowPathState, Waypoint-Shift Pure Pursuit for Overtake, MPC for Follow/Recovery) ----
             if current_state.control_mode == ControlMode.PURE_PURSUIT:
                 v_target, steer_target = self._compute_pure_pursuit_control(pose, v)
+                u = [v_target, steer_target]
+                max_delta = steer_target
+            elif current_state.control_mode == ControlMode.WAYPOINT_SHIFT_PURE_PURSUIT:
+                v_target, steer_target = self._compute_waypoint_shift_pure_pursuit_control(pose, v, ctx)
                 u = [v_target, steer_target]
                 max_delta = steer_target
             else:
