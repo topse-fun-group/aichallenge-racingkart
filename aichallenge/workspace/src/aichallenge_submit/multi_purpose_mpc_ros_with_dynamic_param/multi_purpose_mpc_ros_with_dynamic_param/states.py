@@ -211,12 +211,22 @@ class FollowPathState(DrivingState):
         if has_any_obstacle:
             max_side = max(ctx.overtake_width_left, ctx.overtake_width_right)
             has_clearance = max_side >= self.MIN_OVERTAKE_WIDTH
-            is_zero_speed = (ctx.forward_vehicle_speed is not None and ctx.forward_vehicle_speed < 0.3)
-            is_not_aligned = (ctx.forward_vehicle_heading_diff > np.deg2rad(45.0))
+            # is_zero_speed = (ctx.forward_vehicle_speed is not None and ctx.forward_vehicle_speed < 0.3)
+            # is_not_aligned = (ctx.forward_vehicle_heading_diff > np.deg2rad(45.0))
+            is_slower_leader = (
+                ctx.forward_vehicle_speed is None #
+                or (
+                    ctx.forward_vehicle_speed < 2.77 # 10 km/h = 2.77 m/s
+                        and ctx.velocity - ctx.forward_vehicle_speed >= 4.17 # 4.17 m/s = 15 km/h speed difference threshold for overtaking
+                )
+            )
+            # is_aligned = (ctx.forward_vehicle_heading_diff <= np.deg2rad(45.0))
+            is_clear_side = not ctx.has_side_vehicle
 
             # (1) Overtake if clearance exists AND (leader is stopped OR leader heading is NOT aligned OR side-by-side)
             # (2) Follow if no clearance OR leader is aligned and moving
-            if has_clearance and (is_zero_speed or is_not_aligned or ctx.has_side_vehicle):
+            # if has_clearance and (is_zero_speed or is_not_aligned or ctx.has_side_vehicle):
+            if has_clearance and is_slower_leader and is_clear_side:
                 return "overtake"
             else:
                 return "follow"
@@ -344,9 +354,9 @@ class RecoveryState(DrivingState):
 class FollowState(DrivingState):
     """Follow a leading vehicle — maintain safe distance (8m), match speed."""
 
-    TARGET_FOLLOWING_DISTANCE = 2.5   # [m] (相対距離保持目標)
+    TARGET_FOLLOWING_DISTANCE = 3.0   # [m] (相対距離保持目標)
     STOP_DISTANCE = 1.0               # [m] (完全停止・ブレーキ閾値、遅延を考慮)
-    FOLLOWING_KP = 1.3                # speed adjustment gain
+    FOLLOWING_KP = 1.1                # speed adjustment gain
 
     # ---- MPC parameters (same cornering capability as FollowPathState) ------
     _V_MAX_DEFAULT = 35.0   # [km/h] — ceiling, actual v_max is dynamic
@@ -401,11 +411,21 @@ class FollowState(DrivingState):
 
         max_side = max(ctx.overtake_width_left, ctx.overtake_width_right)
         has_clearance = max_side >= self.MIN_OVERTAKE_WIDTH
-        is_zero_speed = (ctx.forward_vehicle_speed is not None and ctx.forward_vehicle_speed < 0.3)
-        is_not_aligned = (ctx.forward_vehicle_heading_diff > np.deg2rad(45.0))
+        # is_zero_speed = (ctx.forward_vehicle_speed is not None and ctx.forward_vehicle_speed < 0.3)
+        # is_not_aligned = (ctx.forward_vehicle_heading_diff > np.deg2rad(45.0))
+        is_slower_leader = (
+            ctx.forward_vehicle_speed is None #
+            or (
+                ctx.forward_vehicle_speed < 2.77 # 10 km/h = 2.77 m/s
+                and ctx.velocity - ctx.forward_vehicle_speed >= 4.17 # 4.17 m/s = 15 km/h speed difference threshold for overtaking
+            )
+        )
+        # is_aligned = (ctx.forward_vehicle_heading_diff <= np.deg2rad(45.0))
+        is_clear_side = not ctx.has_side_vehicle
 
         # Switch to Overtake if clearance exists AND (leader is stopped OR leader heading is NOT aligned OR side-by-side)
-        if has_clearance and (is_zero_speed or is_not_aligned or ctx.has_side_vehicle):
+        # if has_clearance and (is_zero_speed or is_not_aligned or ctx.has_side_vehicle):
+        if has_clearance and is_slower_leader and is_clear_side:
             return "overtake"
 
         # Stuck detection: ONLY trigger Recovery if NOT intentionally waiting behind a leader/obstacle
@@ -465,7 +485,7 @@ class OvertakeState(DrivingState):
     R = [30_000.0, 0.0]
     QN = [4_000_000.0, 1_000.0, 10_000.0]
 
-    VEHICLE_DETECT_DISTANCE = 8.0
+    VEHICLE_DETECT_DISTANCE = 6.0
 
     def __init__(self) -> None:
         self._overtake_side: str = "left"  # "left" or "right"
