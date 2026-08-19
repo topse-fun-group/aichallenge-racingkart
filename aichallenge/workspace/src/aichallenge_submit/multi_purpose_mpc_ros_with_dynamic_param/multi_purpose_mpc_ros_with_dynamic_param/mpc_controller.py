@@ -1312,6 +1312,29 @@ class MPCController(Node):
             # Apply low pass filter to control signal (agile high gain 0.85 during OvertakeState for quick avoidance)
             steer_gain = 0.85 if isinstance(current_state, OvertakeState) else self._mpc_cfg.steer_low_pass_gain
             acc = self._last_acc + (acc - self._last_acc) * self._mpc_cfg.accel_low_pass_gain
+            if isinstance(current_state, OvertakeState):
+                MIN_REQUIRED_STEER = np.deg2rad(4.0) # Minimum guaranteed steering angle (~0.07 rad)
+                W_MAX = 2.5                          # [m] Maximum road width for full addition
+                W_MIN = 0.8                          # [m] Minimum road width
+                D_MAX = 12.0                         # [m] Distance where addition starts
+                D_PEAK = 3.5                         # [m] Distance where addition peaks (100%)
+
+                # 1. Available width ratio factor (K_width)
+                is_left = (ctx.overtake_width_left >= ctx.overtake_width_right)
+                w_avail = ctx.overtake_width_left if is_left else ctx.overtake_width_right
+                k_width = float(np.clip((w_avail - W_MIN) / (W_MAX - W_MIN), 0.0, 1.0))
+
+                # 2. Distance proximity factor (K_dist)
+                d_fwd = ctx.forward_vehicle_distance if ctx.forward_vehicle_distance is not None else 6.0
+                k_dist = float(np.clip((D_MAX - d_fwd) / (D_MAX - D_PEAK), 0.0, 1.0))
+
+                p_steer = k_width * k_dist
+                min_steer = MIN_REQUIRED_STEER * p_steer
+
+                if is_left:
+                    u[1] = max(u[1], min_steer)
+                else:
+                    u[1] = min(u[1], -min_steer)
             u[1] = self._last_u[1] + (u[1] - self._last_u[1]) * steer_gain
 
             self._last_acc = acc

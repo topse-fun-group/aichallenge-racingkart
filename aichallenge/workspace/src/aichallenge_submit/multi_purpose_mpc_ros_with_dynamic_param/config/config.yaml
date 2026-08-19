@@ -44,8 +44,8 @@ mpc:
   # R: [v, delta]
   # QN: [e_y, e_psi, t]
   R: [100000.0, 1000.0]
-  a_min: -3.0 # m/s^2 (ブレーキ強化で急カーブ対応)
-  a_max: 2.0  # m/s^2 (加速力向上→30km/h超へ素早く到達)
+  a_min: -3.5 # m/s^2 (ブレーキ強化で急カーブ対応)
+  a_max: 3.0  # m/s^2 (加速力向上→30km/h超へ素早く到達)
   delta_max_deg: 32.0 # degrees
   steer_rate_max: 0.35 # rad/s
   control_rate: 40.0 # Hz

@@ -453,17 +453,19 @@ class FollowState(DrivingState):
 class OvertakeState(DrivingState):
     """Overtake a slower vehicle by inducing a lateral offset."""
 
-    LATERAL_OFFSET = 1.8  # [m] (壁に接触しない安全な横オフセット幅)
     MAX_OVERTAKE_DURATION = 2.5  # [s] (追い越し動作の最大存続時間)
 
     # ---- hardcoded parameters (35 km/h) ------------------------------------
     V_MAX = 35.0              # [km/h]
     AY_MAX = 9.5
-    Q = [1_000_000.0, 100_000_000.0, 850_000.0]
-    R = [100_000.0, 0.0]
-    QN = [1_000_000.0, 1_000.0, 10_000.0]
+    # Q = [1_000_000.0, 100_000_000.0, 850_000.0]
+    # R = [100_000.0, 0.0]
+    # QN = [1_000_000.0, 1_000.0, 10_000.0]
+    Q = [8_000_000.0, 20_000_000.0, 300_000.0]
+    R = [30_000.0, 0.0]
+    QN = [4_000_000.0, 1_000.0, 10_000.0]
 
-    VEHICLE_DETECT_DISTANCE = 15.0
+    VEHICLE_DETECT_DISTANCE = 8.0
 
     def __init__(self) -> None:
         self._overtake_side: str = "left"  # "left" or "right"
