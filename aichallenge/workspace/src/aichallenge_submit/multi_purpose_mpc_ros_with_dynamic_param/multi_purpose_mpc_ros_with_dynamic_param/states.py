@@ -173,7 +173,7 @@ class FollowPathState(DrivingState):
     QN = [1_000_000.0, 1_000.0, 10_000.0]
 
     # ---- forward-vehicle detection thresholds -------------------------------
-    VEHICLE_DETECT_DISTANCE = 12.0  # [m]
+    VEHICLE_DETECT_DISTANCE = 9.0  # [m]
     MIN_OVERTAKE_WIDTH = 1.0        # minimum available width to execute overtake [m]
 
     @property
@@ -218,9 +218,10 @@ class FollowPathState(DrivingState):
                 or (ctx.velocity - ctx.forward_vehicle_speed >= 1.5)  # ego is faster by >= 1.5 m/s (5.4 km/h)
             )
             is_clear_side = not ctx.has_side_vehicle
+            is_aligned = abs(ctx.forward_vehicle_heading_diff) <= np.deg2rad(10.0)
 
             # Overtake if clearance exists AND leader is slower/approaching AND side is clear
-            if has_clearance and is_slower_leader and is_clear_side:
+            if has_clearance and is_slower_leader and is_clear_side and is_aligned:
                 return "overtake"
             else:
                 return "follow"
@@ -354,7 +355,7 @@ class FollowState(DrivingState):
 
     # ---- MPC parameters (same cornering capability as FollowPathState) ------
     _V_MAX_DEFAULT = 35.0   # [km/h] — ceiling, actual v_max is dynamic
-    AY_MAX = 9.5
+    AY_MAX = 6.5
     # Q[0]=e_y (lateral), Q[1]=e_psi (heading), Q[2]=t (speed tracking)
     # Same as FollowPathState to maintain identical corner-tracking ability
     # Q = [1_000_000.0, 100_000_000.0, 850_000.0]
@@ -362,9 +363,9 @@ class FollowState(DrivingState):
     # R = [100_000.0, 100.0]
     # QN = [1_000_000.0, 1_000.0, 10_000.0]
     # ---
-    Q  = [1_000_000_000.0, 500_000_000.0, 100_000.0]
-    R  = [1_000_000.0, 500_000_000.0]
-    QN = [1_000_000.0, 5_000.0, 10_000.0]
+    Q  = [2_000_000.0, 100_000_000.0, 100_000.0]
+    R  = [100_000.0, 100_000_000.0]
+    QN = [2_000_000.0, 10_000.0, 3_000.0]
 
     VEHICLE_DETECT_DISTANCE = 12.0
     MIN_OVERTAKE_WIDTH = 1.0  # minimum available width to execute overtake [m]
@@ -415,9 +416,10 @@ class FollowState(DrivingState):
             or (ctx.velocity - ctx.forward_vehicle_speed >= 1.5)  # ego is faster by >= 1.5 m/s (5.4 km/h)
         )
         is_clear_side = not ctx.has_side_vehicle
+        is_aligned = abs(ctx.forward_vehicle_heading_diff) <= np.deg2rad(10.0)
 
         # Switch to Overtake if clearance exists AND leader is slower/approaching AND side is clear
-        if has_clearance and is_slower_leader and is_clear_side:
+        if has_clearance and is_slower_leader and is_clear_side and is_aligned:
             return "overtake"
 
         # Stuck detection: ONLY trigger Recovery if NOT intentionally waiting behind a leader/obstacle

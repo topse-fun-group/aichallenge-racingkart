@@ -1415,8 +1415,12 @@ class MPCController(Node):
                 # PD Gains:
                 # P: restores position & heading to waypoint center
                 # D: provides proactive counter-steering & damping when crossing center line (prevents wall overshoot)
-                KP_Y, KD_Y = 0.35, 0.12
-                KP_PSI, KD_PSI = 0.70, 0.20
+                # KP_Y, KD_Y = 0.35, 0.12
+                # KP_PSI, KD_PSI = 0.70, 0.20
+
+                # case 1: 衝突することはあるが、すこし安定
+                KP_Y, KD_Y = 0.30, 0.12
+                KP_PSI, KD_PSI = 0.80, 0.20
 
                 pd_y = KP_Y * e_y + KD_Y * d_e_y
                 pd_psi = KP_PSI * e_psi + KD_PSI * d_e_psi
