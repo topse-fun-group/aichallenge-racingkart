@@ -217,7 +217,7 @@ class FollowPathState(DrivingState):
                 ctx.forward_vehicle_speed is None #
                 or (
                     ctx.forward_vehicle_speed < 2.77 # 10 km/h = 2.77 m/s
-                        and ctx.velocity - ctx.forward_vehicle_speed >= 4.17 # 4.17 m/s = 15 km/h speed difference threshold for overtaking
+                        # and ctx.velocity - ctx.forward_vehicle_speed >= 4.17 # 4.17 m/s = 15 km/h speed difference threshold for overtaking
                 )
             )
             # is_aligned = (ctx.forward_vehicle_heading_diff <= np.deg2rad(45.0))
@@ -421,7 +421,7 @@ class FollowState(DrivingState):
             ctx.forward_vehicle_speed is None #
             or (
                 ctx.forward_vehicle_speed < 2.77 # 10 km/h = 2.77 m/s
-                and ctx.velocity - ctx.forward_vehicle_speed >= 4.17 # 4.17 m/s = 15 km/h speed difference threshold for overtaking
+                # and ctx.velocity - ctx.forward_vehicle_speed >= 4.17 # 4.17 m/s = 15 km/h speed difference threshold for overtaking
             )
         )
         # is_aligned = (ctx.forward_vehicle_heading_diff <= np.deg2rad(45.0))
