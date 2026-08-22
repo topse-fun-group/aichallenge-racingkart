@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from typing import Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import os, shutil
 from datetime import datetime
@@ -27,17 +27,19 @@ CYAN = ColorRGBA(r=0.0, g=156.0 / 255.0, b=209.0 / 255.0, a=1.0)
 WHITE = ColorRGBA(r=1.0, g=1.0, b=1.0, a=1.0)
 
 class ReferenceVelocityConfigulator():
-    MIN_VELOCITY = 20.0 # km/h
-    MAX_VELOCITY = 30.0 # km/h
+    MIN_VELOCITY = 28.0 # km/h
+    MAX_VELOCITY = 45.0 # km/h
 
     def __init__(
             self,
             node: Node,
             ref_path_config_path: str,
-            ref_vel_config_path: str) -> None:
+            ref_vel_config_path: str,
+            on_change: Optional[Callable[[], None]] = None) -> None:
 
         self._node = node
 
+        self._on_change = on_change
         self._ref_vel_config_path = ref_vel_config_path
         self._reference_path = ReferencePathGenerator.get_reference_path(ref_path_config_path)
         self._ref_vel_cfg = self._load_config(ref_vel_config_path)
@@ -87,6 +89,8 @@ class ReferenceVelocityConfigulator():
                     self._ref_vel_cfg[section_name][param_name] = param.value
 
             self._update_marker()
+            if self._on_change is not None:
+                self._on_change()
             return SetParametersResult(successful=True)
 
         declatre_parameters()

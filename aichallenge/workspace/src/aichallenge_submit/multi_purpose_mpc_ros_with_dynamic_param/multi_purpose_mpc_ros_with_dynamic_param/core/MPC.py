@@ -13,7 +13,8 @@ PREDICTION = '#BA4A00'
 
 class MPC:
     def __init__(self, model, N, Q, R, QN, StateConstraints, InputConstraints,
-                 ay_max, max_steering_rate, wp_id_offset, use_obstacle_avoidance, use_path_constraints_topic, use_max_kappa_pred=True):
+                 ay_max, max_steering_rate, wp_id_offset, use_obstacle_avoidance, use_path_constraints_topic, use_max_kappa_pred=True,
+                 v_lin_min=3.0):
         """
         Constructor for the Model Predictive Controller.
         :param model: bicycle model object to be controlled
@@ -28,6 +29,8 @@ class MPC:
         :param use_obstacle_avoidance: flag to enable obstacle avoidance
         :param use_path_constraints_topic: flag to use path constraints from topic
         :param max_steering_rate: maximum allowed steering rate in rad/s
+        :param v_lin_min: lower bound on the speed the model is linearised about [m/s].
+            Not a lower bound on the commanded speed — see _init_problem.
         """
         # 既存の初期化パラメータ
         self.N = N
@@ -47,6 +50,17 @@ class MPC:
         # 追加: ステアリングレート制限関連のパラメータ
         self.max_steering_rate = max_steering_rate
         self.previous_steering = 0.0  # 前回のステア角
+
+        # 追加: 線形化点の速度下限（指令速度の下限ではない）
+        self.v_lin_min = float(v_lin_min)
+
+        # 遅れ補償を適用した線形化基準 waypoint。_init_problem が毎回書き、
+        # update_prediction が同じ値を読む。
+        self._wp_id_lin = 0
+
+        # 実行不能緩和ループの発火頻度の計測用
+        self.total_solve_count = 0
+        self.relax_solve_count = 0
 
         # 追加: ay_maxによる速度制限の方式切り替え
         self.use_max_kappa_pred = use_max_kappa_pred
@@ -111,28 +125,45 @@ class MPC:
         # Get curvature predictions
         kappa_pred = np.tan(np.append(np.array(self.current_control[3::self.nu]), self.current_control[-1])) / self.model.length
 
-        # Consider control delay
-        self.model.wp_id += self.wp_id_offset
+        # Consider control delay. Use a local base index instead of mutating model.wp_id:
+        # _init_problem() runs up to six times per get_control() (once, plus up to five
+        # times in the infeasibility relaxation loop), and the in-place += made this offset
+        # accumulate. A tick that relaxed three times linearised about a reference 12
+        # waypoints (~12 m) further ahead than a tick that did not, so the curvature, path
+        # width and v_ref all changed between consecutive ticks and the steering jumped.
+        wp_id_lin = self.model.wp_id + self.wp_id_offset
+        self._wp_id_lin = wp_id_lin  # update_prediction() must use the same base
 
         # Iterate over horizon
         for n in range(N):
             # Get waypoint information
-            current_waypoint = self.model.reference_path.get_waypoint(self.model.wp_id + n)
-            next_waypoint = self.model.reference_path.get_waypoint(self.model.wp_id + n + 1)
+            current_waypoint = self.model.reference_path.get_waypoint(wp_id_lin + n)
+            next_waypoint = self.model.reference_path.get_waypoint(wp_id_lin + n + 1)
             delta_s = next_waypoint - current_waypoint
             kappa_ref = current_waypoint.kappa
 
             # Clip reference velocity
             v_ref = np.clip(current_waypoint.v_ref, self.input_constraints['umin'][0], self.input_constraints['umax'][0])
 
+            # Linearise about v_lin, not v_ref. The spatial model divides by the
+            # linearisation speed (b_3 = -delta_s / v^2, f[2] = delta_s / v), so as v_ref
+            # falls towards zero the B matrix swings by orders of magnitude and then jumps
+            # discontinuously to zero at exactly v_ref == 0. That wrecks the conditioning of
+            # the *lateral* problem whenever the following controller slows the car down.
+            # The linearisation point is only the operating point of the first-order
+            # approximation; it does not have to equal the commanded speed.
+            v_lin = max(float(v_ref), self.v_lin_min)
+
             # Compute LTV matrices
-            f, A_lin, B_lin = self.model.linearize(v_ref, kappa_ref, delta_s)
+            f, A_lin, B_lin = self.model.linearize(v_lin, kappa_ref, delta_s)
             A[(n+1) * self.nx: (n+2)*self.nx, n * self.nx:(n+1)*self.nx] = A_lin
             B[(n+1) * self.nx: (n+2)*self.nx, n * self.nu:(n+1)*self.nu] = B_lin
 
-            # Set reference
+            # Set reference. ur is the cost reference and keeps the true v_ref, but uq is
+            # the affine term of the linearised dynamics and must use the same operating
+            # point the matrices were built at.
             ur[n*self.nu:(n+1)*self.nu] = [v_ref, kappa_ref]
-            uq[n * self.nx:(n+1)*self.nx] = B_lin.dot([v_ref, kappa_ref]) - f
+            uq[n * self.nx:(n+1)*self.nx] = B_lin.dot([v_lin, kappa_ref]) - f
 
             # Constrain maximum speed based on curvature
             if self.use_max_kappa_pred:
@@ -145,11 +176,11 @@ class MPC:
         # Update path constraints
         if self.use_obstacle_avoidance and not self.use_path_constraints_topic:
             ub, lb, _ = self.model.reference_path.update_path_constraints(
-                self.model.wp_id + 1,
+                wp_id_lin + 1,
                 [self.model.temporal_state.x, self.model.temporal_state.y, self.model.temporal_state.psi],
                 N, self.model.length, self.model.width, safety_margin)
         else:
-            ref_wp_id = (self.model.wp_id + 1) % len(self.model.reference_path.path_constraints[0])
+            ref_wp_id = (wp_id_lin + 1) % len(self.model.reference_path.path_constraints[0])
             ub = self.model.reference_path.path_constraints[0][ref_wp_id]
             lb = self.model.reference_path.path_constraints[1][ref_wp_id]
             self.model.reference_path.border_cells.current_wp_id = ref_wp_id
@@ -168,7 +199,13 @@ class MPC:
         xmin_dyn[0] = xmax_dyn[0] = self.model.spatial_state.e_y
         xmin_dyn[self.nx::self.nx] = lb
         xmax_dyn[self.nx::self.nx] = ub
-        xr[self.nx::self.nx] = (lb + ub) / 2
+        # Track the raceline (e_y = 0), not the middle of the drivable corridor.
+        # The corridor centre is up to ~1 m off the min-curvature line once safety_margin
+        # is subtracted, so aiming at it made the MPC and the pure-pursuit states chase
+        # different targets and fight each other on every follow_path <-> follow switch.
+        # Only when the raceline falls outside the (margin-reduced) corridor do we fall
+        # back to the nearest feasible point.
+        xr[self.nx::self.nx] = np.clip(np.zeros_like(lb), lb, ub)
 
         # Get equality matrix
         Ax = sparse.kron(sparse.eye(N + 1), -sparse.eye(self.nx)) + sparse.csc_matrix(A)
@@ -247,12 +284,20 @@ class MPC:
 
         self._init_problem(N, self.model.safety_margin)
 
+        self.total_solve_count += 1
+
         try:
             dec = self.optimizer.solve()
             control_signals = np.array(dec.x[-N*nu:])
             use_control_signals = control_signals[1::2]
 
             if not np.all(use_control_signals):
+                # Measurement only — behaviour unchanged. This trigger ("any horizon
+                # curvature is exactly 0.0") is not a feasibility test, and every firing
+                # rescales safety_margin, so consecutive ticks end up solving different
+                # problems. A high rate here is a plausible source of steering jitter;
+                # measure it before deciding how to fix the trigger.
+                self.relax_solve_count += 1
                 for i in range(1, 6):
                     relaxed_safety_margin = self.model.safety_margin * ((5-i) / 5.0)
                     self._init_problem(N, relaxed_safety_margin)
@@ -306,6 +351,11 @@ class MPC:
         if self.infeasibility_counter > (N - 1) and self.infeasibility_counter % 100 == 0:
             print('No control signal computed!')
 
+        if self.total_solve_count % 400 == 0:  # ~10 s at 40 Hz
+            pct = 100.0 * self.relax_solve_count / self.total_solve_count
+            print(f"[MPC] relaxation loop fired on "
+                  f"{self.relax_solve_count}/{self.total_solve_count} solves ({pct:.1f}%)")
+
         return u, max_delta
 
     def update_prediction(self, spatial_state_prediction, N):
@@ -321,9 +371,10 @@ class MPC:
 
         # Iterate over prediction horizon
         for n in range(2, N):
-            # Get associated waypoint
+            # Get associated waypoint. Must use the same delay-compensated base that
+            # _init_problem() linearised about, or the marker is offset from the solution.
             associated_waypoint = self.model.reference_path.\
-                get_waypoint(self.model.wp_id+n)
+                get_waypoint(self._wp_id_lin+n)
             # Transform predicted spatial state to temporal state
             predicted_temporal_state = self.model.s2t(associated_waypoint,
                                             spatial_state_prediction[n, :])

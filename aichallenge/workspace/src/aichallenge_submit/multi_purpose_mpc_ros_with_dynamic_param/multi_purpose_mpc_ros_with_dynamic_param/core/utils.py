@@ -25,3 +25,19 @@ def load_ref_path(csv_file_path: str):
     psi = df['psi_rad'].tolist()
     kappa = df['kappa_radpm'].tolist()
     return x, y, psi, kappa
+
+
+def load_ref_path_speed_profile(csv_file_path: str) -> Tuple[List[float], List[float], List[float]]:
+    """Load the design speed profile (vx_mps) that ships with the raceline CSV.
+
+    The min-curvature optimizer already solved a lateral/longitudinal speed profile for
+    this raceline (ay <= 12 m/s^2). Returns (x, y, vx) so the caller can map each profile
+    point onto a ReferencePath waypoint by nearest neighbour — index-to-index mapping is
+    not safe because _construct_path() resamples and smooths the raw CSV points.
+
+    Returns three empty lists when the CSV has no ``vx_mps`` column.
+    """
+    df = pd.read_csv(csv_file_path)
+    if 'vx_mps' not in df.columns:
+        return [], [], []
+    return df['x_m'].tolist(), df['y_m'].tolist(), df['vx_mps'].tolist()

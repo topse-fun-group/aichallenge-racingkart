@@ -21,6 +21,7 @@ import numpy as np
 class ControlMode(Enum):
     PURE_PURSUIT = auto()
     MPC = auto()
+    WAYPOINT_SHIFT_PURE_PURSUIT = auto()
     OVERRIDE = auto()
 
 try:
@@ -36,6 +37,44 @@ except ImportError:
 # ---------------------------------------------------------------------------
 STUCK_VELOCITY_THRESHOLD = 0.3  # [m/s] — below this is considered "stopped"
 STUCK_DURATION = 2.0            # [s] — stopped 8s triggers recovery (prevents startup false-alarm)
+
+
+# ---------------------------------------------------------------------------
+# Forward-vehicle detection (shared by every state and by both detectors)
+# ---------------------------------------------------------------------------
+# follow_path と follow が別々の検知器・別々の視野角を見ていると、
+# 「片方だけが見える」角度に他車がいるとき 1.5s ヒステリシス + 1.0s dwell の
+# 周期で状態が往復し、そのたびに制御モードが Pure Pursuit ↔ MPC で切り替わって
+# 大きくふらつく。両方の検知器がこの同じ値を使うこと。
+FORWARD_CONE_DEG = 45.0        # [deg] 前方検知の半角
+FORWARD_LATERAL_MAX = 3.5      # [m] 前方検知の横方向ゲート
+
+# 進入 < 離脱 とすることで距離方向にもヒステリシスを持たせる
+ENTER_FOLLOW_DISTANCE = 10.0    # [m] 中心間の経路弧長。これ以下で follow へ
+EXIT_FOLLOW_DISTANCE = 9.0     # [m] これを超えて初めて follow_path へ戻る
+
+# カート全長。bicycle_model.length (1.087) はホイールベースであって全長ではない。
+# 中心間距離からバンパー間ギャップを出すために引く。
+VEHICLE_LENGTH = 1.6           # [m]
+
+
+# ---------------------------------------------------------------------------
+# Overtake gating (shared by FollowPathState and FollowState)
+# ---------------------------------------------------------------------------
+# 先行車がこれ以下の速度なら追い越し対象。24.0 ちょうどだと「24km/h前後で走る
+# 先行車」が境界に乗り、V2X の2点差分速度のノイズで判定が毎tick反転する。
+OVERTAKE_LEAD_SPEED_KMH = 25.5   # [km/h] was 24.0
+
+# 接近中判定: 相対距離 OVERTAKE_CLOSING_MARGIN_M を OVERTAKE_TTC_SEC 以内に
+# 詰められる速度差があるか。== 速度差 >= 1.47 m/s。
+OVERTAKE_CLOSING_MARGIN_M = 1.0  # [m] default 2.2
+OVERTAKE_TTC_SEC = 2.5           # [s] default 1.5
+
+# 「もう詰めきっている」と見なす、目標車間からの許容超過幅。
+# 追従制御は v_ego -> v_lead に収束させるのが仕事なので、整定すると速度差が 0 に
+# なり接近中判定は原理的に成立しなくなる。目標車間まで詰めたこと自体を
+# 追い越しのトリガにしないと、遅い先行車の後ろで永久に follow から出られない。
+SETTLED_GAP_TOLERANCE = 1.0      # [m]
 
 
 # ---------------------------------------------------------------------------
@@ -77,9 +116,14 @@ class StateContext:
     path_e_y: float = 0.0        # signed lateral offset from path centerline [m]
 
     # --- V2X (Phase 2) ------------------------------------------------------
-    forward_vehicle_distance: Optional[float] = None   # [m]
+    forward_vehicle_distance: Optional[float] = None   # [m] centre-to-centre along the path
+    forward_vehicle_gap: float = 0.0                   # [m] bumper-to-bumper (distance - VEHICLE_LENGTH)
     forward_vehicle_speed: Optional[float] = None       # [m/s]
     forward_vehicle_heading_diff: float = 0.0          # absolute heading diff relative to path_psi [rad]
+    # 自車と同一レーン帯 (|y_rel| <= FORWARD_LATERAL_MAX) にいる最寄り車両の符号付き経路弧長 [m]。
+    # 正 = 前方 / 負 = 後方。前方コーン (±45°) は掛けていないので、真横に並んだ相手も
+    # 抜き終わった相手もここには残る。OvertakeState の完了判定用。
+    nearest_vehicle_s_rel: Optional[float] = None       # [m] signed; negative = behind ego
 
     # --- ReferencePath Clearance & Overtake ----------------------------------
     overtake_width_left: float = 0.0      # available width on left [m]
@@ -89,6 +133,14 @@ class StateContext:
     side_vehicle_speed: Optional[float] = None  # speed of side vehicle [m/s]
     lidar_forward_clearance: Optional[float] = None   # retained for compatibility
     lidar_range_clearance: Optional[float] = None
+    # --- Detailed Multi-Vehicle Scan for FollowPath transitions ---
+    has_forward_vehicle: bool = False                # -15° <= angle <= 15°, r <= VEHICLE_DETECT_DISTANCE (default 8m)
+    min_forward_overtake_width: float = 0.0          # Minimum of max(left_w, right_w) among fwd vehicles [m]
+    closest_forward_vehicle_speed: Optional[float] = None  # Speed of nearest fwd vehicle [m/s]
+    has_left_side_vehicle: bool = False              # 30° <= angle <= 150°, 0 <= y <= 3m
+    has_left_side_cutin_hazard: bool = False         # 3s projected: 30° <= angle <= 90°, 0 <= y <= 3m
+    has_right_side_vehicle: bool = False             # -150° <= angle <= -30°, -3m <= y <= 0
+    has_right_side_cutin_hazard: bool = False        # 3s projected: -90° <= angle <= -30°, -3m <= y <= 0
 
     # --- Stuck detection ----------------------------------------------------
     time_stopped_sec: float = 0.0  # duration velocity ≈ 0 [s]
@@ -128,11 +180,6 @@ class DrivingState(ABC):
         """Return the MPC parameters for this state."""
         ...
 
-    @abstractmethod
-    def check_transition(self, ctx: StateContext) -> Optional[str]:
-        """Return the name of the next state, or ``None`` to stay."""
-        ...
-
     def compute_control_override(
         self, ctx: StateContext
     ) -> Optional[Tuple[float, float, float]]:
@@ -146,34 +193,40 @@ class DrivingState(ABC):
         return None
 
     def on_enter(self, ctx: StateContext) -> None:
-        """Called once when entering this state."""
+        """Called once when transitioning into this state."""
         pass
 
     def on_exit(self, ctx: StateContext) -> None:
-        """Called once when leaving this state."""
+        """Called once when transitioning out of this state."""
         pass
+
+    @abstractmethod
+    def check_transition(self, ctx: StateContext) -> Optional[str]:
+        """Evaluate sensor snapshot and return next state name, or None."""
+        ...
 
 
 # ---------------------------------------------------------------------------
-# Phase 1 states
+# Concrete States
 # ---------------------------------------------------------------------------
 
 class FollowPathState(DrivingState):
-    """Normal path-following — no obstacles or vehicles ahead.
+    """Normal racing state: tracks reference path using pure pursuit / MPC without obstacles."""
 
-    Target speed: 35 km/h (~9.7 m/s)
-    """
-
-    # ---- hardcoded parameters -----------------------------------------------
-    V_MAX = 35.0              # [km/h]
+    # ---- hardcoded parameters (45 km/h) ------------------------------------
+    V_MAX = 45.0              # [km/h] (default target speed)
     AY_MAX = 9.5              # [m/s^2]
     Q = [1_000_000.0, 100_000_000.0, 850_000.0]
     R = [100_000.0, 100.0]  # R[1]=1000.0 を追加してステアリング微振動を抑止
     QN = [1_000_000.0, 1_000.0, 10_000.0]
 
-    # ---- forward-vehicle detection thresholds -------------------------------
-    VEHICLE_DETECT_DISTANCE = 8.0   # [m]
-    MIN_OVERTAKE_WIDTH = 1.4         # minimum available width to execute overtake [m]
+    # ---- forward-vehicle detection thresholds ------------------------------
+    # モジュール定数から取ること。ここだけ変えると follow 側の判定と食い違い、
+    # 状態がチャタリングする（FORWARD_CONE_DEG のコメント参照）。
+    VEHICLE_DETECT_DISTANCE = ENTER_FOLLOW_DISTANCE
+    VEHICLE_DETECT_ANGLE_MIN = -FORWARD_CONE_DEG
+    VEHICLE_DETECT_ANGLE_MAX = FORWARD_CONE_DEG
+    MIN_OVERTAKE_WIDTH = 2.9          # [m] (車幅 1.4m + オフセット 1.2m = 3.0)
 
     @property
     def name(self) -> str:
@@ -193,7 +246,7 @@ class FollowPathState(DrivingState):
         )
 
     def check_transition(self, ctx: StateContext) -> Optional[str]:
-        # Collision → Recovery (always immediate)
+        # 1. Recovery (always immediate)
         if ctx.is_colliding:
             return "recovery"
 
@@ -203,34 +256,60 @@ class FollowPathState(DrivingState):
                 and ctx.velocity < STUCK_VELOCITY_THRESHOLD):
             return "recovery"
 
-        # Phase 2: forward / side vehicle detection (V2X)
-        eff_dist = _get_effective_forward_distance(ctx)
-        has_forward_vehicle = (eff_dist is not None and eff_dist < self.VEHICLE_DETECT_DISTANCE)
-        has_any_obstacle = has_forward_vehicle or ctx.has_side_vehicle
+        # 2. Check Follow condition (any of 3 conditions)
+        # 条件1: 前方15度から-15度の範囲かつ前方検知距離内に車両がある
+        #        かつ 前方の車両の左右のどちらかの道幅が MIN_OVERTAKE_WIDTH 以下 (複数車は最小道幅)
+        follow_cond1 = (
+            ctx.has_forward_vehicle
+            and ctx.min_forward_overtake_width <= self.MIN_OVERTAKE_WIDTH
+        )
 
-        if has_any_obstacle:
-            max_side = max(ctx.overtake_width_left, ctx.overtake_width_right)
-            has_clearance = max_side >= self.MIN_OVERTAKE_WIDTH
-            # is_zero_speed = (ctx.forward_vehicle_speed is not None and ctx.forward_vehicle_speed < 0.3)
-            # is_not_aligned = (ctx.forward_vehicle_heading_diff > np.deg2rad(45.0))
-            is_slower_leader = (
-                ctx.forward_vehicle_speed is None #
-                or (
-                    ctx.forward_vehicle_speed < 2.77 # 10 km/h = 2.77 m/s
-                        # and ctx.velocity - ctx.forward_vehicle_speed >= 4.17 # 4.17 m/s = 15 km/h speed difference threshold for overtaking
-                )
+        # 条件2: 前方30度から150度かつy軸0mから3m以内に他車があり、
+        #        相対速度×3秒後の位置が前方30度から90度かつy軸0mから3m以内
+        follow_cond2 = ctx.has_left_side_cutin_hazard
+
+        # 条件3: 前方-30度から-150度かつy軸0mから-3m以内に他車があり、
+        #        相対速度×3秒後の位置が前方-30度から-90度かつy軸0mから-3m以内
+        follow_cond3 = ctx.has_right_side_cutin_hazard
+
+        # if follow_cond1 or follow_cond2 or follow_cond3:
+        #     return "follow"
+        if follow_cond1 and (follow_cond2 or follow_cond3):
+            return "follow"
+
+        # 3. Check Overtake condition (all 5 conditions must be met)
+        # ① 前方15度から-15度の範囲かつ前方検知距離内に車両がある
+        # ② 前方30度から150度、かつ、y方向0mから3m以内に他の車両がない
+        # ③ 前方-30度から-150度、かつ、y方向0mから-3m以内に他の車両がない
+        # ④ 前方の車両の左右のどちらかの道幅が MIN_OVERTAKE_WIDTH より大きい (複数車は最小道幅)
+        # ⑤ 前の車両の速度が OVERTAKE_LEAD_SPEED_KMH 以下 かつ 接近中 (速度差 >= 1.47 m/s)
+        if ctx.has_forward_vehicle:
+            no_left_vehicle = not ctx.has_left_side_vehicle
+            no_right_vehicle = not ctx.has_right_side_vehicle
+            has_sufficient_width = ctx.min_forward_overtake_width > self.MIN_OVERTAKE_WIDTH
+
+            lead_speed = ctx.closest_forward_vehicle_speed if ctx.closest_forward_vehicle_speed is not None else 0.0
+            is_slow_leader = (lead_speed <= (OVERTAKE_LEAD_SPEED_KMH / 3.6))
+            speed_diff = ctx.velocity - lead_speed
+            # follow_path はまだ接近中のフェーズなので、接近判定のみで妥当。
+            # 割り算をやめたのは speed_diff < 0（自車の方が遅い）のとき 2.2/負数 が
+            # 符号で <= 1.5 を通ってしまい、speed_diff == 0.0 では
+            # ZeroDivisionError で制御ループが落ちるため（両車停止時に起こり得る）。
+            is_ttc_close = speed_diff >= (
+                (1.5 * VEHICLE_LENGTH + OVERTAKE_CLOSING_MARGIN_M) / OVERTAKE_TTC_SEC
             )
-            # is_aligned = (ctx.forward_vehicle_heading_diff <= np.deg2rad(45.0))
-            is_clear_side = not ctx.has_side_vehicle
-
-            # (1) Overtake if clearance exists AND (leader is stopped OR leader heading is NOT aligned OR side-by-side)
-            # (2) Follow if no clearance OR leader is aligned and moving
-            # if has_clearance and (is_zero_speed or is_not_aligned or ctx.has_side_vehicle):
-            if has_clearance and is_slower_leader and is_clear_side:
+            # has_diff = ctx.forward_vehicle_gap < 3.0
+            
+            if (no_left_vehicle
+                    and no_right_vehicle
+                    and has_sufficient_width
+                    and is_slow_leader
+                    and is_ttc_close):
                 return "overtake"
-            else:
-                return "follow"
 
+            return "follow"
+
+        # 4. Stay in FollowPath if none matched
         return None
 
 
@@ -254,11 +333,11 @@ class RecoveryState(DrivingState):
     FORWARD_TURN_DURATION = 2.0  # [s] (最大2秒前進)
 
     BACK_SPEED = -4.0            # [m/s] (後退速度)
-    FORWARD_TURN_SPEED = 3.5     # [m/s] (前進旋回速度)
+    FORWARD_TURN_SPEED = 4.0     # [m/s] (前進旋回速度)
     BACK_ACCEL = 3.5             # [m/s^2]
     FORWARD_ACCEL = 3.0          # [m/s^2]
 
-    STEER_LOCK = 0.55            # [rad] (大舵角ステアリング)
+    STEER_LOCK = 0.58            # [rad] (大舵角ステアリング)
 
     def __init__(self) -> None:
         self._enter_time: Optional[float] = None
@@ -352,15 +431,33 @@ class RecoveryState(DrivingState):
 # ---------------------------------------------------------------------------
 
 class FollowState(DrivingState):
-    """Follow a leading vehicle — maintain safe distance (8m), match speed."""
+    """Follow a leading vehicle — keep a constant time headway, match speed."""
 
-    TARGET_FOLLOWING_DISTANCE = 3.0   # [m] (相対距離保持目標)
-    STOP_DISTANCE = 1.0               # [m] (完全停止・ブレーキ閾値、遅延を考慮)
-    FOLLOWING_KP = 1.1                # speed adjustment gain
+    # ---- spacing controller (constant time headway) -------------------------
+    # 目標車間を自車速に比例させるので、時間車間そのものが速度フィードバックとして
+    # 働く。距離だけの純P制御はアクチュエータ遅れと組み合わさると必ず
+    # オーバーシュートする（string 不安定）ため使わない。
+    # 整定時のバンパー間ギャップは厳密に D0 + TIME_HEADWAY * v_ego になる。
+    # K_GAP / K_V は到達の速さを決めるだけで整定値には影響しない（整定点では
+    # (gap - d_des) == 0 なので係数が何であれ指令は同じ）。
+    # 中心間距離 (= forward_vehicle_distance) はこれに VEHICLE_LENGTH (1.6) を足した値。
+    D0 = 1.5                     # [m] 停止時のバンパー間ギャップ default 1.5
+    # 0.35 だと 24km/h の先行車に対して中心間 4.93m で整定し、has_forward_vehicle の
+    # 検知距離 ENTER_FOLLOW_DISTANCE (5.0m) の境界に張り付いて追い越し判定が立たない。
+    # 0.20 なら中心間 3.93m。一次系の時定数は 2.85s -> 2.70s とほぼ変わらず、
+    # オーバーシュートなしの性質も保たれる。
+    TIME_HEADWAY = 0.35          # [s] default 0.35
+    K_GAP = 0.6                  # [1/s] ギャップ誤差 → 速度
+    K_V = 0.5                    # [-]  相対速度ダンピング
+    EMERGENCY_GAP = 0.5          # [m] これ未満でのみ 0 指令
+    # 前方車が動いている限り這わない。低速は MPC の線形化も痛めるため
+    # (core/MPC.py の v_lin_min 参照)、縦横どちらにとっても効く。
+    MIN_FOLLOW_SPEED_KMH = 10.0
+    LEADER_MOVING_MPS = 0.5
 
     # ---- MPC parameters (same cornering capability as FollowPathState) ------
     _V_MAX_DEFAULT = 35.0   # [km/h] — ceiling, actual v_max is dynamic
-    AY_MAX = 9.5
+    AY_MAX = 6.5
     # Q[0]=e_y (lateral), Q[1]=e_psi (heading), Q[2]=t (speed tracking)
     # Same as FollowPathState to maintain identical corner-tracking ability
     # Q = [1_000_000.0, 100_000_000.0, 850_000.0]
@@ -368,14 +465,28 @@ class FollowState(DrivingState):
     # R = [100_000.0, 100.0]
     # QN = [1_000_000.0, 1_000.0, 10_000.0]
     # ---
-    Q  = [1_000_000_000.0, 500_000_000.0, 100_000.0]
-    R  = [1_000_000.0, 500_000_000.0]
-    QN = [1_000_000.0, 5_000.0, 10_000.0]
+    # Q  = [2_000_000.0, 100_000_000.0, 100_000.0]
+    # R  = [100_000.0, 100_000_000.0]
+    # QN = [2_000_000.0, 10_000.0, 3_000.0]
+    # ---
+    Q = [200.0, 1500.0, 100.0]
+    R = [0.1, 1200.0]
+    QN = [200.0, 1500.0, 100.0]
 
-    VEHICLE_DETECT_DISTANCE = 2.5
-    MIN_OVERTAKE_WIDTH = 1.4  # minimum available width to execute overtake [m]
+
+
+    # 離脱しきい値は進入 (ENTER_FOLLOW_DISTANCE) より遠くする
+    VEHICLE_DETECT_DISTANCE = EXIT_FOLLOW_DISTANCE
+    MIN_OVERTAKE_WIDTH = 2.9  # minimum available width to execute overtake [m]
 
     CLEAR_HYSTERESIS_SEC = 1.5  # Must remain clear for 1.5 seconds continuously before returning to follow_path
+
+    # 横制御の選択。False にすると follow_path と同一の Pure Pursuit で走る。
+    # mpc_controller 側の PD 補正ブロックと pose シフトは既に ControlMode.MPC で
+    # ゲートされているので、このフラグ一つで両方とも一緒に切れる。
+    # 縦制御（車間保持）は横のディスパッチ後に u[0] を上書きする構造なので、
+    # どちらを選んでも影響を受けない。MPC と PP の実走比較用。
+    USE_MPC_FOLLOW: bool = False
 
     def __init__(self) -> None:
         self._clear_start_time: Optional[float] = None
@@ -383,6 +494,10 @@ class FollowState(DrivingState):
     @property
     def name(self) -> str:
         return "follow"
+
+    @property
+    def control_mode(self) -> ControlMode:
+        return ControlMode.MPC if self.USE_MPC_FOLLOW else ControlMode.PURE_PURSUIT
 
     def get_params(self) -> MPCStateParams:
         return MPCStateParams(
@@ -397,87 +512,150 @@ class FollowState(DrivingState):
         if ctx.is_colliding:
             return "recovery"
 
-        eff_dist = _get_effective_forward_distance(ctx)
+        # Stuck detection: velocity near zero for too long → Recovery (unless in cooldown)
+        if (not ctx.is_in_recovery_cooldown
+                and ctx.time_stopped_sec >= STUCK_DURATION
+                and ctx.velocity < STUCK_VELOCITY_THRESHOLD):
+            return "recovery"
 
-        # 1.5s Hysteresis: Only return to follow_path if path remains clear for >= 1.5s continuously
-        has_v2x_leader = (ctx.forward_vehicle_distance is not None and ctx.forward_vehicle_distance < self.VEHICLE_DETECT_DISTANCE)
-        has_any_obstacle = (has_v2x_leader or ctx.has_side_vehicle)
-        is_forward_clear = not has_any_obstacle
-        if is_forward_clear:
-            if self._clear_start_time is None:
-                self._clear_start_time = ctx.current_time_sec
-            elapsed_clear = ctx.current_time_sec - self._clear_start_time
-            if elapsed_clear >= self.CLEAR_HYSTERESIS_SEC:
-                self._clear_start_time = None
-                return "follow_path"
-        else:
-            self._clear_start_time = None  # Instantly reset timer if vehicle is detected
-
-        max_side = max(ctx.overtake_width_left, ctx.overtake_width_right)
-        has_clearance = max_side >= self.MIN_OVERTAKE_WIDTH
-        # is_zero_speed = (ctx.forward_vehicle_speed is not None and ctx.forward_vehicle_speed < 0.3)
-        # is_not_aligned = (ctx.forward_vehicle_heading_diff > np.deg2rad(45.0))
-        is_slower_leader = (
-            ctx.forward_vehicle_speed is None #
-            or (
-                ctx.forward_vehicle_speed < 2.77 # 10 km/h = 2.77 m/s
-                # and ctx.velocity - ctx.forward_vehicle_speed >= 4.17 # 4.17 m/s = 15 km/h speed difference threshold for overtaking
-            )
+        # 2. Check Follow condition (any of 3 conditions)
+        # 条件1: 前方15度から-15度の範囲かつ前方検知距離内に車両がある
+        #        かつ 前方の車両の左右のどちらかの道幅が MIN_OVERTAKE_WIDTH 以下 (複数車は最小道幅)
+        follow_cond1 = (
+            ctx.has_forward_vehicle
+            and ctx.min_forward_overtake_width <= self.MIN_OVERTAKE_WIDTH
         )
-        # is_aligned = (ctx.forward_vehicle_heading_diff <= np.deg2rad(45.0))
-        is_clear_side = not ctx.has_side_vehicle
 
-        # Switch to Overtake if clearance exists AND (leader is stopped OR leader heading is NOT aligned OR side-by-side)
-        # if has_clearance and (is_zero_speed or is_not_aligned or ctx.has_side_vehicle):
-        if has_clearance and is_slower_leader and is_clear_side:
-            return "overtake"
+        # 条件2: 前方30度から150度かつy軸0mから3m以内に他車があり、
+        #        相対速度×3秒後の位置が前方30度から90度かつy軸0mから3m以内
+        follow_cond2 = ctx.has_left_side_cutin_hazard
 
-        # Stuck detection: ONLY trigger Recovery if NOT intentionally waiting behind a leader/obstacle
-        is_waiting_behind_leader = (eff_dist is not None and eff_dist < 10.0 and not has_clearance)
-        if not is_waiting_behind_leader:
-            if (not ctx.is_in_recovery_cooldown
-                    and ctx.time_stopped_sec >= STUCK_DURATION
-                    and ctx.velocity < STUCK_VELOCITY_THRESHOLD):
-                return "recovery"
+        # 条件3: 前方-30度から-150度かつy軸0mから-3m以内に他車があり、
+        #        相対速度×3秒後の位置が前方-30度から-90度かつy軸0mから-3m以内
+        follow_cond3 = ctx.has_right_side_cutin_hazard
 
+        # if follow_cond1 or follow_cond2 or follow_cond3:
+        #     return "follow"
+        if follow_cond1 and (follow_cond2 or follow_cond3):
+                    return "follow"
+
+        # 3. Check Overtake condition (all 5 conditions must be met)
+        # ① 前方15度から-15度の範囲かつ前方検知距離内に車両がある
+        # ② 前方30度から150度、かつ、y方向0mから3m以内に他の車両がない
+        # ③ 前方-30度から-150度、かつ、y方向0mから-3m以内に他の車両がない
+        # ④ 前方の車両の左右のどちらかの道幅が MIN_OVERTAKE_WIDTH より大きい (複数車は最小道幅)
+        # ⑤ 前の車両の速度が OVERTAKE_LEAD_SPEED_KMH 以下 かつ 接近中 (速度差 >= 1.47 m/s)
+        if ctx.has_forward_vehicle:
+            no_left_vehicle = not ctx.has_left_side_vehicle
+            no_right_vehicle = not ctx.has_right_side_vehicle
+            has_sufficient_width = ctx.min_forward_overtake_width > self.MIN_OVERTAKE_WIDTH
+
+            lead_speed = ctx.closest_forward_vehicle_speed if ctx.closest_forward_vehicle_speed is not None else 0.0
+            # 24.0 ちょうどだと「24km/h前後で走る先行車」が境界に乗り、V2X の
+            # 2点差分速度のノイズで毎tick反転する。マージンを取って 27.0。
+            is_slow_leader = (lead_speed <= (OVERTAKE_LEAD_SPEED_KMH / 3.6))
+            speed_diff = ctx.velocity - lead_speed
+            # 追従が整定すると speed_diff -> 0 になるので、接近判定だけでは
+            # 原理的に追い越しに入れない（永遠に follow のまま）。
+            # 「詰めきって遅い先行車の直後に張り付いている」状態も追い越し可とする。
+            # 除算をやめたのは speed_diff < 0 のとき 2.2/負数 が符号で通ってしまい、
+            # speed_diff == 0.0 では ZeroDivisionError になるため。
+            is_closing = speed_diff >= (
+                (1.5 * VEHICLE_LENGTH + OVERTAKE_CLOSING_MARGIN_M) / OVERTAKE_TTC_SEC
+            )
+            is_settled_behind = (
+                ctx.forward_vehicle_gap
+                <= self.D0 + self.TIME_HEADWAY * ctx.velocity + SETTLED_GAP_TOLERANCE)
+            is_ttc_close = is_closing or is_settled_behind
+            # has_diff = ctx.forward_vehicle_gap < 3.0
+
+            if (no_left_vehicle
+                    and no_right_vehicle
+                    and has_sufficient_width
+                    and is_slow_leader
+                    and is_ttc_close):
+                return "overtake"
+
+            return "follow"
+
+        
+        if (not ctx.has_forward_vehicle 
+            and not ctx.has_left_side_vehicle 
+            and not ctx.has_right_side_vehicle
+        ):
+            return "follow_path"
+
+        # 4. Stay in Follow if none matched
         return None
 
-    # -- dynamic v_max -------------------------------------------------------
 
-    def get_adjusted_v_max_kmh(self, ctx: StateContext) -> float:
-        """Compute dynamic v_max [km/h] with strict distance governor and side-vehicle yielding."""
-        # If a side-vehicle is alongside and clearance is insufficient, yield by reducing speed
+    # -- spacing controller --------------------------------------------------
+
+    def get_target_speed_mps(self, ctx: StateContext, v_lead: float) -> float:
+        """Target speed [m/s] for following the leader — the single longitudinal law.
+
+        Constant time headway: the desired gap grows with ego speed, so the headway term
+        itself acts as velocity feedback. ``K_V`` adds explicit relative-velocity damping
+        on top. Treating the whole loop as first order gives
+        ``d(gap)/dt = 0.123*v_lead - 0.351*(gap - D0)`` — a stable 2.85 s time constant
+        with no overshoot, settling at ``gap = D0 + TIME_HEADWAY * v_lead``.
+
+        ``v_lead`` is passed in already low-pass filtered; the V2X tracker derives it from
+        a two-sample finite difference and is far too noisy to use as a feedforward term raw.
+        """
+        v_max_mps = self._V_MAX_DEFAULT / 3.6
+
+        # Side vehicle alongside with nowhere to go: yield to open a longitudinal gap.
+        # 横に車両がいる、かつ、左右のどちらの幅も追い越し幅がない場合、(横の車両の速度-5.0m/s)で追従する
         max_side = max(ctx.overtake_width_left, ctx.overtake_width_right)
         if ctx.has_side_vehicle and max_side < self.MIN_OVERTAKE_WIDTH:
             side_speed = ctx.side_vehicle_speed if ctx.side_vehicle_speed is not None else 5.0
-            target_mps = max(0.0, side_speed - 1.5)  # Yield by slowing down 1.5 m/s to open longitudinal gap
-            return float(np.clip(target_mps * 3.6, 0.0, self._V_MAX_DEFAULT))
+            return float(np.clip(side_speed - 1.5, 0.0, v_max_mps))
 
-        eff_dist = _get_effective_forward_distance(ctx)
-        if eff_dist is None:
-            return self._V_MAX_DEFAULT
+        if ctx.forward_vehicle_distance is None:
+            return v_max_mps
 
-        fwd_speed = ctx.forward_vehicle_speed if ctx.forward_vehicle_speed is not None else 0.0
+        # 緊急停止: 前方車両とのバンパー間ギャップが 0.5m 以下なら 0 指令
+        gap = ctx.forward_vehicle_gap
+        if gap <= self.EMERGENCY_GAP:
+            return 0.0
 
-        if eff_dist <= self.STOP_DISTANCE:
-            target_mps = 0.0
-        elif eff_dist < self.TARGET_FOLLOWING_DISTANCE:
-            # Distance governor: ego speed must never exceed leader speed when closer than 8.0m
-            ratio = (eff_dist - self.STOP_DISTANCE) / (self.TARGET_FOLLOWING_DISTANCE - self.STOP_DISTANCE)
-            target_mps = fwd_speed * ratio
-        else:
-            # Normal following: match speed + proportional distance error
-            distance_error = eff_dist - self.TARGET_FOLLOWING_DISTANCE
-            target_mps = fwd_speed + self.FOLLOWING_KP * distance_error
+        # 一定時間の車間制御
+        v_ego = ctx.velocity
+        d_des = self.D0 + self.TIME_HEADWAY * v_ego
 
-        target_kmh = target_mps * 3.6
-        return float(np.clip(target_kmh, 0.0, self._V_MAX_DEFAULT))
+
+        # 前方車両の道幅の大きさに応じて、停止時の距離を短くする=速度を補正する
+        # if ctx.min_forward_overtake_width is not None and ctx.min_forward_overtake_width > 1.0:
+        #     d_des -= 0.7 * np.clip(
+        #         ctx.min_forward_overtake_width, 0.0, self.MIN_OVERTAKE_WIDTH
+        #     ) / self.MIN_OVERTAKE_WIDTH  
+
+        v_cmd = v_lead + self.K_GAP * (gap - d_des) + self.K_V * (v_lead - v_ego)
+
+        if v_lead > self.LEADER_MOVING_MPS:
+            v_cmd = max(v_cmd, self.MIN_FOLLOW_SPEED_KMH / 3.6)
+
+        return float(np.clip(v_cmd, 0.0, v_max_mps))
 
 
 class OvertakeState(DrivingState):
     """Overtake a slower vehicle by inducing a lateral offset."""
 
-    MAX_OVERTAKE_DURATION = 2.5  # [s] (追い越し動作の最大存続時間)
+    # [s] 追い越し動作の最大存続時間。
+    # StateManager.MIN_DWELL_TIME (1.0s) より短い値にすると、タイムアウトが dwell に
+    # 阻まれて毎tick黙って握り潰され、結局 1.0s 継続することになるため、必ず長くする。
+    # 24 km/h の先行車を抜き切るには計算上 2.9 s 必要（進入 中心間 4.9m → 完了 -2.5m の
+    # 相対変位 7.4m を、Overtake の V_MAX 35km/h との速度差 3.05 m/s で詰める）。
+    # 一方この横オフセットは進入時に決めたきり固定で、レースラインから壁までは
+    # 中央値 3.45m・最小 1.75m しかないため、長く保持するほど壁に寄るリスクが上がる。
+    MAX_OVERTAKE_DURATION = OVERTAKE_TTC_SEC
+
+    # [m] 追い越し完了とみなす中心間の後方距離。自車の後端が相手の前端を抜けるのに
+    # VEHICLE_LENGTH (1.6) が要り、レースラインへ戻り始める余裕として +0.9。
+    PASSED_CLEARANCE = 2.5
+
+    MIN_OVERTAKE_WIDTH = 2.9
 
     # ---- hardcoded parameters (35 km/h) ------------------------------------
     V_MAX = 35.0              # [km/h]
@@ -489,16 +667,23 @@ class OvertakeState(DrivingState):
     R = [30_000.0, 0.0]
     QN = [4_000_000.0, 1_000.0, 10_000.0]
 
-    VEHICLE_DETECT_DISTANCE = 6.0
+    USE_MPC_OVERTAKE: bool = False  # False: Waypoint-Shift Pure Pursuit (Default), True: MPC
 
     def __init__(self) -> None:
         self._overtake_side: str = "left"  # "left" or "right"
         self._enter_time: Optional[float] = None
         self._calculated_offset: float = 1.8
+        self._was_alongside: bool = False  # 一度でも真横に並んだか
+        self._passed: bool = False         # 抜き切ったか（一度立てたらラッチ）
 
     @property
     def name(self) -> str:
         return "overtake"
+
+    @property
+    def control_mode(self) -> ControlMode:
+        """Control mode: Waypoint-shifted Pure Pursuit by default, switchable to MPC."""
+        return ControlMode.MPC if self.USE_MPC_OVERTAKE else ControlMode.WAYPOINT_SHIFT_PURE_PURSUIT
 
     def get_params(self) -> MPCStateParams:
         return MPCStateParams(
@@ -512,6 +697,9 @@ class OvertakeState(DrivingState):
 
     def on_enter(self, ctx: StateContext) -> None:
         self._enter_time = ctx.current_time_sec
+        # StateManager はこのインスタンスを使い回すので、ラッチは必ず入場時に落とす
+        self._was_alongside = False
+        self._passed = False
         # ReferencePath から計算された空き領域の真ん中を通る動的オフセットを採用
         if abs(ctx.target_overtake_offset) > 0.1:
             self._calculated_offset = ctx.target_overtake_offset
@@ -527,6 +715,31 @@ class OvertakeState(DrivingState):
 
     def on_exit(self, ctx: StateContext) -> None:
         self._enter_time = None
+        self._was_alongside = False
+        self._passed = False
+
+    # -- overtake completion --------------------------------------------------
+
+    def _update_passed(self, ctx: StateContext) -> bool:
+        """前車が自車より後ろに出たか。一度 True になったらラッチする。"""
+        if self._passed:
+            return True
+
+        if ctx.has_side_vehicle:
+            self._was_alongside = True
+
+        # まだ前方に車がいる間は完了ではない。このガードがないと、自車を追ってくる
+        # 別の車が nearest_vehicle_s_rel の最小値を取ってしまい、進入直後に
+        # 「もう抜けた」と誤判定する。
+        if ctx.forward_vehicle_distance is not None:
+            return False
+
+        s_rel = ctx.nearest_vehicle_s_rel
+        if s_rel is not None and s_rel <= -self.PASSED_CLEARANCE:
+            self._passed = True      # 実測: 相手の中心が自車の PASSED_CLEARANCE 後方
+        elif s_rel is None and self._was_alongside:
+            self._passed = True      # 真横に並んだ後に検知範囲から消えた（ロスト対策）
+        return self._passed
 
     def check_transition(self, ctx: StateContext) -> Optional[str]:
         if ctx.is_colliding:
@@ -538,16 +751,47 @@ class OvertakeState(DrivingState):
                 and ctx.velocity < STUCK_VELOCITY_THRESHOLD):
             return "recovery"
 
-        # Overtake timeout: return to follow_path after 2.5s for smooth raceline return
-        if self._enter_time is not None:
-            elapsed = ctx.current_time_sec - self._enter_time
-            if elapsed >= self.MAX_OVERTAKE_DURATION:
-                return "follow_path"
+        passed = self._update_passed(ctx)
+        timed_out = (
+            self._enter_time is not None
+            and (ctx.current_time_sec - self._enter_time) >= self.MAX_OVERTAKE_DURATION
+        )
 
-        # Vehicle cleared
-        if ctx.forward_vehicle_distance is None:
-            return "follow_path"
-        if ctx.forward_vehicle_distance >= self.VEHICLE_DETECT_DISTANCE:
+        # 抜き切るかタイムアウトするまでは他の遷移を一切許さない。
+        # 従来はここで forward_vehicle_distance が None になった時点で follow_path へ
+        # 戻っていたが、真横に並ぶと相手が前方コーン (±45°) から外れて None になるため、
+        # 抜き切る前に必ずレースラインへ戻っていた。停止車はライン外に居ることが多く
+        # 「前方から消えた = 抜けた」が実質成立していたので気付かれなかった。
+        if not (passed or timed_out):
+            return None
+
+        # 2. Check Follow condition (any of 3 conditions)
+        # 条件1: 前方15度から-15度の範囲かつ前方検知距離内に車両がある
+        #        かつ 前方の車両の左右のどちらかの道幅が MIN_OVERTAKE_WIDTH 以下 (複数車は最小道幅)
+        follow_cond1 = (
+            ctx.has_forward_vehicle
+            and ctx.min_forward_overtake_width <= self.MIN_OVERTAKE_WIDTH
+        )
+
+        # follow → state
+        # 条件2: 前方30度から150度かつy軸0mから3m以内に他車があり、
+        #        相対速度×3秒後の位置が前方30度から90度かつy軸0mから3m以内
+        follow_cond2 = ctx.has_left_side_cutin_hazard
+
+        # 条件3: 前方-30度から-150度かつy軸0mから-3m以内に他車があり、
+        #        相対速度×3秒後の位置が前方-30度から-90度かつy軸0mから-3m以内
+        follow_cond3 = ctx.has_right_side_cutin_hazard
+
+        if follow_cond1 or follow_cond2 or follow_cond3:
+            return "follow"
+
+        if ctx.has_forward_vehicle:
+            return "follow"
+
+        if (not ctx.has_forward_vehicle
+            and not ctx.has_left_side_vehicle
+            and not ctx.has_right_side_vehicle
+        ):
             return "follow_path"
 
-        return None
+        return "follow_path"
