@@ -58,7 +58,7 @@ from multi_purpose_mpc_ros_msgs.msg import AckermannControlBoostCommand, PathCon
 from multi_purpose_mpc_ros_with_dynamic_param.tools.reference_velocity_configulator import ReferenceVelocityConfigulator
 
 # State machine
-from multi_purpose_mpc_ros_with_dynamic_param.states import StateContext, MPCStateParams, FollowState, ControlMode
+from multi_purpose_mpc_ros_with_dynamic_param.states import StateContext, MPCStateParams, FollowState, OvertakeState, ControlMode
 from multi_purpose_mpc_ros_with_dynamic_param.state_manager import StateManager
 from multi_purpose_mpc_ros_with_dynamic_param.lidar_processor import LidarProcessor
 
@@ -126,7 +126,10 @@ class MPCConfig:
 
 class MPCController(Node):
 
-    PKG_PATH: str = get_package_share_directory('multi_purpose_mpc_ros') + "/"
+    try:
+        PKG_PATH: str = get_package_share_directory('multi_purpose_mpc_ros_with_dynamic_param') + "/"
+    except Exception:
+        PKG_PATH: str = get_package_share_directory('multi_purpose_mpc_ros') + "/"
     # MAX_LAPS = 6
     MAX_LAPS = 10000
     BUG_VEL = 40.0 # km/h
@@ -450,6 +453,16 @@ class MPCController(Node):
                 return None
             return ReferenceVelocityConfigulator(self, self._config_path, self._ref_vel_config_path)
 
+        def create_pp_ref_vel_configulator() -> Optional[ReferenceVelocityConfigulator]:
+            pp = getattr(self._cfg, "pure_pursuit", None)
+            pp_ref_vel_path = getattr(pp, "ref_vel_path", None) if pp else None
+            if pp_ref_vel_path is not None:
+                full_path = self.in_pkg_share(pp_ref_vel_path) if not os.path.isabs(pp_ref_vel_path) else pp_ref_vel_path
+                if os.path.exists(full_path):
+                    self.get_logger().info(f"Loaded Pure Pursuit specific ref_vel: {full_path}")
+                    return ReferenceVelocityConfigulator(self, self._config_path, full_path, param_prefix="ref_vel_pp")
+            return self._ref_vel_configulator
+
         self._map = create_map()
         self._reference_path = create_ref_path(self._map)
         self._car = create_car(self._reference_path)
@@ -457,6 +470,7 @@ class MPCController(Node):
         compute_speed_profile(self._car, self._mpc_cfg)
 
         self._ref_vel_configulator: Optional[ReferenceVelocityConfigulator] = create_ref_vel_configulator()
+        self._ref_vel_configulator_pp: Optional[ReferenceVelocityConfigulator] = create_pp_ref_vel_configulator()
 
         self._trajectory: Optional[Trajectory] = None
         self._path_constraints = None
@@ -660,6 +674,7 @@ class MPCController(Node):
         if msg.data and not self._enable_control:
             self.get_logger().info("Control mode request received")
             self._enable_control = True
+            self._start_time = self.get_clock().now().nanoseconds / 1e9
 
     def _path_constraints_callback(self, msg: PathConstraints):
         self._reference_path.set_path_constraints(
@@ -859,11 +874,48 @@ class MPCController(Node):
             if hasattr(self._mpc, "model") and hasattr(self._mpc.model, "wp_id"):
                 self._mpc.model.wp_id = closest_idx
 
-            base_v_mps = (
-                ext_v if use_ext_v
-                else (float(closest_wp.v_ref) if closest_wp.v_ref is not None else default_speed)
-            )
+            if use_ext_v:
+                base_v_mps = ext_v
+            elif self._ref_vel_configulator_pp is not None:
+                curr_v_mps = kmh_to_m_per_sec(float(self._ref_vel_configulator_pp.get_ref_vel(closest_idx)))
+                n_w = len(self._reference_path.waypoints)
+                ahead_v_mps = min(
+                    kmh_to_m_per_sec(float(self._ref_vel_configulator_pp.get_ref_vel((closest_idx + k) % n_w)))
+                    for k in range(0, 7, 2)
+                )
+                base_v_mps = min(curr_v_mps, ahead_v_mps)
+            elif closest_wp.v_ref is not None:
+                base_v_mps = float(closest_wp.v_ref)
+            else:
+                base_v_mps = default_speed
             target_longitudinal_vel = base_v_mps * speed_scale
+
+            # Recovery Launch: limit speed to 12 km/h for 2.0s after exiting recovery to cleanly steer away from walls
+            now_sec = self.get_clock().now().nanoseconds / 1e9
+            if self._last_recovery_exit_time is not None and (now_sec - self._last_recovery_exit_time) < 2.0:
+                target_longitudinal_vel = min(target_longitudinal_vel, kmh_to_m_per_sec(12.0))
+
+            # FollowState: dynamically limit speed to maintain 5.5m safe distance behind leader
+            if self._state_manager.current_state.name == "follow":
+                current_state = self._state_manager.current_state
+                if isinstance(current_state, FollowState):
+                    ctx_for_follow = self._build_state_context(0.02, False)
+                    follow_v_max = current_state.get_adjusted_v_max_kmh(ctx_for_follow)
+                    target_longitudinal_vel = min(target_longitudinal_vel, kmh_to_m_per_sec(follow_v_max))
+
+            # Push-to-Pass / Overtake Speed:
+            if self._state_manager.current_state.name == "overtake":
+                overtake_params = self._state_manager.current_state.get_params()
+                full_overtake_v = kmh_to_m_per_sec(float(overtake_params.v_max))
+                # Safety guard while transitioning into open lane (only for high-speed leader)
+                ctx_ot = self._build_state_context(0.02, False)
+                fwd_d = ctx_ot.forward_vehicle_distance
+                fwd_spd = ctx_ot.forward_vehicle_speed
+                if fwd_d is not None and fwd_d < 4.0 and abs(self._current_lateral_offset) < 0.8 and (fwd_spd is not None and fwd_spd >= 6.0):
+                    safe_approach_v = fwd_spd + kmh_to_m_per_sec(4.0)  # smooth approach speed
+                    target_longitudinal_vel = min(full_overtake_v, safe_approach_v)
+                else:
+                    target_longitudinal_vel = full_overtake_v
 
             lookahead_distance = lookahead_gain * target_longitudinal_vel + lookahead_min
             rear_x = pose.x - (wheel_base / 2.0) * np.cos(pose.theta)
@@ -879,12 +931,25 @@ class MPCController(Node):
                     break
 
             lookahead_wp = self._reference_path.waypoints[target_idx]
-            alpha = np.arctan2(lookahead_wp.y - rear_y, lookahead_wp.x - rear_x) - pose.theta
+            # Apply lateral offset to lookahead waypoint to track shifted lane smoothly
+            wp_psi = float(lookahead_wp.psi)
+            offset = self._current_lateral_offset
+            target_x = lookahead_wp.x - offset * np.sin(wp_psi)
+            target_y = lookahead_wp.y + offset * np.cos(wp_psi)
+
+            alpha = np.arctan2(target_y - rear_y, target_x - rear_x) - pose.theta
             alpha = (alpha + np.pi) % (2 * np.pi) - np.pi
+
+            # Active lateral steer kick ONLY when expanding offset into open lane (never kick towards leader when returning!)
+            offset_err = self._target_lateral_offset - self._current_lateral_offset
+            if abs(self._target_lateral_offset) > 0.5 and (self._target_lateral_offset * offset_err > 0):
+                steer_kick = float(np.clip(0.35 * offset_err, -0.25, 0.25))
+            else:
+                steer_kick = 0.0
 
             steering_tire_angle = steer_gain * np.arctan2(
                 2.0 * wheel_base * np.sin(alpha), lookahead_distance
-            )
+            ) + steer_kick
             steer_cmd = float(np.clip(steering_tire_angle, -0.55, 0.55))
 
             return target_longitudinal_vel, steer_cmd
@@ -909,9 +974,14 @@ class MPCController(Node):
         MAX_LATERAL_DIFF = 3.5             # Lateral tolerance [m] covering full track width
 
         pose = odom_to_pose_2d(self._odom)  # type: ignore
+        ego_linear_v = self._odom.twist.twist.linear.x if self._odom is not None else 10.0  # type: ignore
         best_dist: Optional[float] = None
         best_speed: Optional[float] = None
         best_heading: Optional[float] = None
+        best_y_rel: Optional[float] = None
+        best_x_rel: Optional[float] = None
+        best_pred_y_rel: Optional[float] = None
+        best_lead_pos: Optional[Tuple[float, float]] = None
 
         cos_t = np.cos(pose.theta)
         sin_t = np.sin(pose.theta)
@@ -931,24 +1001,32 @@ class MPCController(Node):
             x_rel = cos_t * dx + sin_t * dy
             y_rel = -sin_t * dx + cos_t * dy
 
-            # Must be ahead in longitudinal direction (any distance ahead > 0.0m)
-            if x_rel <= 0.0 or x_rel > MAX_DIST:
-                continue
-
             # Must be in the same track corridor laterally
             if abs(y_rel) > MAX_LATERAL_DIFF:
                 continue
 
-            angle = np.arctan2(dy, dx) - pose.theta
-            angle = (angle + np.pi) % (2 * np.pi) - np.pi
-            if abs(angle) > HALF_ANGLE:
+            dist = float(np.hypot(dx, dy))
+            if dist > MAX_DIST and x_rel > 0:
                 continue
 
-            dist = float(np.hypot(dx, dy))
-            if best_dist is None or dist < best_dist:
-                best_dist = dist
+            if best_x_rel is None or dist < (best_dist if best_dist is not None else 999.0):
+                best_x_rel = float(x_rel)
+                best_dist = dist if x_rel > 0.0 else None
+                best_y_rel = float(y_rel)
+                best_lead_pos = (float(vx_pos), float(vy_pos))
                 vx_vel, vy_vel = self._v2x_tracker.velocity(vid)
                 best_speed = float(np.hypot(vx_vel, vy_vel))
+
+                # Estimate time of passing t_pass and predict leader's lateral position at t_pass
+                lead_v = best_speed if best_speed > 0.5 else 6.94
+                ego_v = max(ego_linear_v, 10.0)  # ~38 km/h overtake speed
+                delta_v = max(ego_v - lead_v, 1.5)
+                t_pass = np.clip(x_rel / delta_v, 0.2, 3.0) if x_rel > 0 else 0.0
+
+                pred_lx = vx_pos + vx_vel * t_pass
+                pred_ly = vy_pos + vy_vel * t_pass
+                best_pred_y_rel = float(-sin_t * (pred_lx - pose.x) + cos_t * (pred_ly - pose.y))
+
                 if best_speed > 0.3:
                     best_heading = float(np.arctan2(vy_vel, vx_vel))
                 elif len(buf) >= 2:
@@ -957,7 +1035,7 @@ class MPCController(Node):
                     if np.hypot(dx_v, dy_v) > 0.05:
                         best_heading = float(np.arctan2(dy_v, dx_v))
 
-        return best_dist, best_speed, best_heading
+        return best_dist, best_speed, best_heading, best_y_rel, best_x_rel, best_pred_y_rel, best_lead_pos
 
     def _build_state_context(self, dt: float, is_colliding: bool) -> StateContext:
         """Assemble a StateContext snapshot for the current tick."""
@@ -973,7 +1051,11 @@ class MPCController(Node):
 
         # --- Stuck detection: track how long velocity has been near zero ---
         STOPPED_THRESHOLD = 0.3  # [m/s]
-        if abs(v) < STOPPED_THRESHOLD:
+        # Do not count stuck time before control is enabled or during startup (10.0s)
+        if not self._enable_control or self._start_time is None or (now_sec - self._start_time) < 10.0:
+            self._stopped_since = None
+            time_stopped = 0.0
+        elif abs(v) < STOPPED_THRESHOLD:
             if self._stopped_since is None:
                 self._stopped_since = now_sec
             time_stopped = now_sec - self._stopped_since
@@ -981,20 +1063,19 @@ class MPCController(Node):
             self._stopped_since = None
             time_stopped = 0.0
 
-        fwd_dist, fwd_speed, fwd_heading = self._detect_forward_vehicle()
-        left_w, right_w = self._lidar_processor.get_overtake_widths()
-        lidar_clearance = self._lidar_processor.get_forward_clearance(half_angle_deg=80.0)
-        range_clearance = self._lidar_processor.get_range_clearance()
+        fwd_dist, fwd_speed, fwd_heading, fwd_y_rel, fwd_x_rel, fwd_pred_y_rel, fwd_pos = self._detect_forward_vehicle()
+        lidar_clearance = fwd_dist
+        range_clearance = fwd_dist
 
         if self._start_time is None:
             self._start_time = now_sec
 
-        # Cooldown check: 10.0s after startup or 5.0s after exiting RecoveryState
+        # Cooldown check: 3.0s after startup or 3.5s after exiting RecoveryState
         is_cooldown = False
-        if (now_sec - self._start_time) < 10.0:
+        if (now_sec - self._start_time) < 3.0:
             is_cooldown = True
         if self._last_recovery_exit_time is not None:
-            if (now_sec - self._last_recovery_exit_time) < 5.0:
+            if (now_sec - self._last_recovery_exit_time) < 3.5:
                 is_cooldown = True
 
         # Closest waypoint orientation & signed lateral distance
@@ -1005,9 +1086,51 @@ class MPCController(Node):
         closest_wp = self._reference_path.waypoints[closest_idx]
 
         path_psi = float(closest_wp.psi)
+        path_kappa = float(closest_wp.kappa) if hasattr(closest_wp, "kappa") and closest_wp.kappa is not None else 0.0
+        n_wps = len(self._reference_path.waypoints)
+        future_kappas = [
+            abs(float(self._reference_path.waypoints[(closest_idx + k) % n_wps].kappa))
+            for k in range(25)
+            if hasattr(self._reference_path.waypoints[(closest_idx + k) % n_wps], "kappa")
+        ]
+        future_max_kappa = max(future_kappas) if future_kappas else abs(path_kappa)
+
+        # Check if approaching straight zone (ahead 8-25 waypoints is straight)
+        upcoming_kappas = [
+            abs(float(self._reference_path.waypoints[(closest_idx + k) % n_wps].kappa))
+            for k in range(8, 25)
+            if hasattr(self._reference_path.waypoints[(closest_idx + k) % n_wps], "kappa")
+        ]
+        is_approaching_straight = (max(upcoming_kappas) < 0.04) if upcoming_kappas else False
+
         dx = pose.x - closest_wp.x
         dy = pose.y - closest_wp.y
         path_e_y = float(-dx * np.sin(path_psi) + dy * np.cos(path_psi))
+
+        # Calculate available overtake width using track width (6.0m) and leader's true course lateral position
+        half_track_width = float(self._cfg.reference_path.max_width) / 2.0  # 3.0m
+        if fwd_dist is not None and fwd_pos is not None and len(self._waypoint_xy) > 0:
+            lx, ly = fwd_pos
+            lead_xy = np.array([lx, ly], dtype=np.float64)
+            lead_diffs = self._waypoint_xy - lead_xy
+            lead_closest_idx = int(np.argmin(np.einsum("ij,ij->i", lead_diffs, lead_diffs)))
+            lead_wp = self._reference_path.waypoints[lead_closest_idx]
+
+            lead_dx = lx - lead_wp.x
+            lead_dy = ly - lead_wp.y
+            lead_psi = float(lead_wp.psi)
+            # Exact signed lateral offset of leader from raceline: + is left of raceline, - is right
+            leader_e_y = float(-lead_dx * np.sin(lead_psi) + lead_dy * np.cos(lead_psi))
+
+            left_w = float(np.clip(half_track_width - leader_e_y, 0.0, half_track_width * 2.0))
+            right_w = float(np.clip(half_track_width + leader_e_y, 0.0, half_track_width * 2.0))
+        elif fwd_dist is not None and fwd_y_rel is not None:
+            leader_e_y = path_e_y + fwd_y_rel
+            left_w = float(np.clip(half_track_width - leader_e_y, 0.0, half_track_width * 2.0))
+            right_w = float(np.clip(half_track_width + leader_e_y, 0.0, half_track_width * 2.0))
+        else:
+            left_w = half_track_width
+            right_w = half_track_width
 
         fwd_heading_diff = 0.0
         if fwd_heading is not None:
@@ -1026,13 +1149,20 @@ class MPCController(Node):
             path_deviation=self._compute_path_deviation(),
             path_psi=path_psi,
             path_e_y=path_e_y,
+            path_kappa=path_kappa,
+            future_max_kappa=future_max_kappa,
+            is_approaching_straight=is_approaching_straight,
             forward_vehicle_distance=fwd_dist,
             forward_vehicle_speed=fwd_speed,
             forward_vehicle_heading_diff=fwd_heading_diff,
+            forward_vehicle_x_rel=fwd_x_rel,
+            forward_vehicle_y_rel=fwd_y_rel,
+            forward_vehicle_pred_y_rel=fwd_pred_y_rel,
             overtake_width_left=left_w,
             overtake_width_right=right_w,
             lidar_forward_clearance=lidar_clearance,
             lidar_range_clearance=range_clearance,
+            current_laps=self._current_laps if self._current_laps is not None else 1,
             time_stopped_sec=time_stopped,
             is_in_recovery_cooldown=is_cooldown,
         )
@@ -1108,8 +1238,10 @@ class MPCController(Node):
             is_colliding = False
             if self._last_colliding_time is not None:
                 elapsed_from_last_colliding = (now - self._last_colliding_time).nanoseconds / 1e9
-                if elapsed_from_last_colliding < 5.0:
+                if elapsed_from_last_colliding < 0.5:
                     is_colliding = True
+                else:
+                    self._last_colliding_time = None
 
             pose = odom_to_pose_2d(self._odom) # type: ignore
             v = self._odom.twist.twist.linear.x
@@ -1121,21 +1253,25 @@ class MPCController(Node):
             if new_params is not None:
                 self._apply_state_params(new_params)
 
+            if self._state_manager.current_state_name == "recovery":
+                self._last_colliding_time = None  # Consume collision event
+
             if prev_state_name == "recovery" and self._state_manager.current_state_name != "recovery":
                 self._last_recovery_exit_time = (now.nanoseconds / 1e9)
-                # Instantly reset last control memory to forward motion for zero-lag launch
+                self._stopped_since = None  # Clear stopped timer to prevent instant re-trigger
+                # Instantly reset last control memory to neutral forward motion
                 self._last_u[0] = 1.5
+                self._last_u[1] = 0.0  # Reset steering memory to neutral!
                 self._last_acc = 1.0
-                self.get_logger().info("Exited RecoveryState: instant launch & recovery cooldown started")
+                self._current_lateral_offset = 0.0  # Clear lane offset cleanly
+                self.get_logger().info("Exited RecoveryState: instant launch, neutral steer & recovery cooldown started")
 
-            # Smoothly interpolate lateral offset towards target_offset (tapering for smooth lane change & return)
-            rate = 0.08
+            # Dynamic interpolation rate: fast lane change (0.35) to avoid rear-ending, smooth return (0.05)
+            rate = 0.35 if abs(self._target_lateral_offset) > 0.5 else 0.05
             self._current_lateral_offset += (self._target_lateral_offset - self._current_lateral_offset) * rate
 
-            offset = self._current_lateral_offset
-            x_shifted = pose.x - offset * np.sin(pose.theta)
-            y_shifted = pose.y + offset * np.cos(pose.theta)
-            self._car.update_states(x_shifted, y_shifted, pose.theta)
+            # Pass TRUE ego vehicle pose to car state without double offset
+            self._car.update_states(pose.x, pose.y, pose.theta)
 
             # Follow state: dynamically adjust v_max to match leader speed
             current_state = self._state_manager.current_state
@@ -1173,21 +1309,39 @@ class MPCController(Node):
                 self._sim_logger.plot_animation(t, self._loop, self._current_laps, self._lap_times, is_colliding, u, self._mpc, self._car)
                 return
 
-            # ---- Control Selection (Hybrid: Pure Pursuit for FollowPathState, MPC for Follow/Overtake) ----
+            # ---- Control Selection (Hybrid: Pure Pursuit for FollowPath/Follow/Overtake, MPC for fallback) ----
             if current_state.control_mode == ControlMode.PURE_PURSUIT:
                 v_target, steer_target = self._compute_pure_pursuit_control(pose, v)
+                if isinstance(current_state, FollowState):
+                    follow_v_max_mps = kmh_to_m_per_sec(current_state.get_adjusted_v_max_kmh(ctx))
+                    v_target = min(v_target, follow_v_max_mps)
+                elif isinstance(current_state, OvertakeState):
+                    # Parallel offset rocket attack speed:
+                    # In sharp hairpins (abs(path_kappa) >= 0.070), limit to 24 km/h for crisp cornering without understeering into walls.
+                    # In straights and fast sections, UNLEASH full 38.0 km/h power!
+                    if abs(ctx.path_kappa) >= 0.070:
+                        v_target = kmh_to_m_per_sec(24.0)
+                    else:
+                        v_target = kmh_to_m_per_sec(38.0)
                 u = [v_target, steer_target]
                 max_delta = steer_target
             else:
                 with self._stats.time_block("control"):
                     u, max_delta = self._mpc.get_control()
 
-            # FollowState uses dynamic following speed; skip static ref_vel overwrite
-            if self._ref_vel_configulator is not None and not isinstance(current_state, FollowState):
+            # FollowState uses dynamic following speed; OvertakeState uses full 38 km/h speed (24 km/h in hairpins)
+            if isinstance(current_state, OvertakeState):
+                target_ot_kmh = 24.0 if abs(ctx.path_kappa) >= 0.070 else 38.0
+                v_max_mps = kmh_to_m_per_sec(target_ot_kmh)
+                self._mpc.update_v_max(v_max_mps)
+                v_ref_list: List[float] = [v_max_mps] * len(self._reference_path.waypoints)
+                self._reference_path.set_v_ref(v_ref_list)
+                u[0] = v_max_mps
+            elif self._ref_vel_configulator is not None and not isinstance(current_state, FollowState):
                 ref_vel_mps = self._ref_vel_configulator.get_ref_vel(self._mpc.model.wp_id)
                 ref_vel_mps_capped = min(ref_vel_mps, self._mpc_cfg.v_max)
                 self._mpc.update_v_max(ref_vel_mps_capped)
-                v_ref: List[float] = [ref_vel_mps_capped] * len(self._reference_path.waypoints)
+                v_ref = [ref_vel_mps_capped] * len(self._reference_path.waypoints)
                 self._reference_path.set_v_ref(v_ref)
 
             # override by brake command if control is disabled
@@ -1205,7 +1359,15 @@ class MPCController(Node):
 
             acc = 0.
             bug_acc_enabled = False
-            if self.USE_BUG_ACC:
+            if override is not None:
+                acc = override[2]
+            elif isinstance(current_state, OvertakeState):
+                # Full throttle overtake acceleration (3.5 m/s^2)
+                acc = 1.5
+            elif current_state.control_mode == ControlMode.PURE_PURSUIT:
+                acc = self.KP * (u[0] - v)
+                acc = np.clip(acc, self._mpc_cfg.a_min, 1.5)
+            elif self.USE_BUG_ACC:
                 def deg2rad(deg):
                     return deg * np.pi / 180.0
 
@@ -1216,7 +1378,7 @@ class MPCController(Node):
                     self._pred_marker_color = RED
                 elif abs(v) > kmh_to_m_per_sec(41.0) or abs(u[1]) > deg2rad(10.0):
                     bug_acc_enabled = False
-                    acc = self._mpc_cfg.a_max
+                    acc = min(self._mpc_cfg.a_max, 1.0)
                     self._pred_marker_color = YELLOW
                 else:
                     bug_acc_enabled = True
@@ -1225,11 +1387,20 @@ class MPCController(Node):
             else:
                 acc = self.KP * (u[0] - v)
                 # print(f"v: {v}, u[0]: {u[0]}, acc: {acc}")
-                acc = np.clip(acc, self._mpc_cfg.a_min, self._mpc_cfg.a_max)
+                acc = np.clip(acc, self._mpc_cfg.a_min, 1.5)
 
             # FollowState: Limit positive acceleration to prevent rear-end collisions due to latency
             if isinstance(current_state, FollowState):
-                acc = np.clip(acc, self._mpc_cfg.a_min, 1.0)  # max 1.0 m/s² (half of a_max)
+                acc = np.clip(acc, self._mpc_cfg.a_min, 1.0)  # max 1.0 m/s²
+
+            # Global clamp (allow 3.5 m/s^2 in OvertakeState for decisive passing)
+            max_allowed_acc = 3.5 if isinstance(current_state, OvertakeState) else 1.5
+            if not bug_acc_enabled:
+                acc = float(np.clip(acc, self._mpc_cfg.a_min, max_allowed_acc))
+
+            # apply steer rate limiter to prevent excessive jerking while maintaining sharp cornering capability
+            max_delta_steer = 2.0 * dt
+            u[1] = float(np.clip(u[1], self._last_u[1] - max_delta_steer, self._last_u[1] + max_delta_steer))
 
             # apply low pass filter to control signal
             acc = self._last_acc + (acc - self._last_acc) * self._mpc_cfg.accel_low_pass_gain

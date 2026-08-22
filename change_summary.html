@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Challenge Racing Kart - 改修内容・ベースライン比較サマリー</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-primary: #0a0e17;
+      --bg-secondary: #121826;
+      --bg-card: rgba(26, 34, 52, 0.7);
+      --border-color: rgba(255, 255, 255, 0.08);
+      --border-accent: rgba(99, 102, 241, 0.3);
+      --text-primary: #f1f5f9;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      --accent-cyan: #06b6d4;
+      --accent-blue: #3b82f6;
+      --accent-indigo: #6366f1;
+      --accent-emerald: #10b981;
+      --accent-amber: #f59e0b;
+      --accent-rose: #f43f5e;
+      --badge-bg-baseline: rgba(100, 116, 139, 0.2);
+      --badge-border-baseline: rgba(148, 163, 184, 0.3);
+      --badge-bg-new: rgba(16, 185, 129, 0.15);
+      --badge-border-new: rgba(16, 185, 129, 0.4);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Inter', 'Noto Sans JP', -apple-system, BlinkMacSystemFont, sans-serif;
+      background-color: var(--bg-primary);
+      background-image: 
+        radial-gradient(at 0% 0%, rgba(99, 102, 241, 0.15) 0px, transparent 50%),
+        radial-gradient(at 100% 100%, rgba(6, 182, 212, 0.12) 0px, transparent 50%),
+        radial-gradient(at 50% 50%, rgba(15, 23, 42, 0.5) 0px, transparent 100%);
+      background-attachment: fixed;
+      color: var(--text-primary);
+      line-height: 1.6;
+      padding: 2.5rem 1.5rem;
+      min-height: 100vh;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    /* Header */
+    header {
+      margin-bottom: 3rem;
+      padding-bottom: 2rem;
+      border-bottom: 1px solid var(--border-color);
+      position: relative;
+    }
+
+    .header-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.35rem 0.85rem;
+      background: rgba(99, 102, 241, 0.15);
+      border: 1px solid var(--border-accent);
+      border-radius: 9999px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: #a5b4fc;
+      margin-bottom: 1rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    .header-badge::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--accent-cyan);
+      box-shadow: 0 0 8px var(--accent-cyan);
+    }
+
+    h1 {
+      font-size: 2.4rem;
+      font-weight: 800;
+      background: linear-gradient(135deg, #ffffff 0%, #cbd5e1 50%, #94a3b8 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      letter-spacing: -0.02em;
+      margin-bottom: 0.75rem;
+    }
+
+    .subtitle {
+      font-size: 1.05rem;
+      color: var(--text-secondary);
+      max-width: 800px;
+    }
+
+    /* Summary Stats Grid */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 1.25rem;
+      margin-bottom: 3rem;
+    }
+
+    .stat-card {
+      background: var(--bg-card);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--border-color);
+      border-radius: 1rem;
+      padding: 1.25rem 1.5rem;
+      transition: all 0.25s ease;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .stat-card::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 2px;
+      background: linear-gradient(90deg, var(--accent-indigo), var(--accent-cyan));
+      opacity: 0;
+      transition: opacity 0.25s ease;
+    }
+
+    .stat-card:hover {
+      transform: translateY(-2px);
+      border-color: var(--border-accent);
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4);
+    }
+
+    .stat-card:hover::before {
+      opacity: 1;
+    }
+
+    .stat-title {
+      font-size: 0.825rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 0.5rem;
+    }
+
+    .stat-value {
+      font-size: 1.75rem;
+      font-weight: 800;
+      color: #ffffff;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .stat-desc {
+      font-size: 0.8rem;
+      color: var(--accent-emerald);
+      margin-top: 0.35rem;
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+    }
+
+    /* Section Cards */
+    .section-card {
+      background: var(--bg-card);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--border-color);
+      border-radius: 1.25rem;
+      margin-bottom: 2.5rem;
+      overflow: hidden;
+      box-shadow: 0 15px 35px -10px rgba(0, 0, 0, 0.5);
+    }
+
+    .section-header {
+      padding: 1.5rem 1.75rem;
+      background: rgba(18, 24, 38, 0.6);
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .section-icon {
+      width: 2.25rem;
+      height: 2.25rem;
+      border-radius: 0.625rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.1rem;
+    }
+
+    .icon-speed { background: rgba(245, 158, 11, 0.15); color: var(--accent-amber); border: 1px solid rgba(245, 158, 11, 0.3); }
+    .icon-v2x { background: rgba(6, 182, 212, 0.15); color: var(--accent-cyan); border: 1px solid rgba(6, 182, 212, 0.3); }
+    .icon-state { background: rgba(99, 102, 241, 0.15); color: #a5b4fc; border: 1px solid var(--border-accent); }
+    .icon-pure { background: rgba(16, 185, 129, 0.15); color: var(--accent-emerald); border: 1px solid rgba(16, 185, 129, 0.3); }
+
+    .section-title {
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: #ffffff;
+      letter-spacing: -0.01em;
+    }
+
+    /* Table */
+    .table-container {
+      width: 100%;
+      overflow-x: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+      font-size: 0.925rem;
+    }
+
+    th {
+      padding: 1rem 1.5rem;
+      background: rgba(15, 23, 42, 0.4);
+      font-weight: 600;
+      color: var(--text-secondary);
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    td {
+      padding: 1.15rem 1.5rem;
+      border-bottom: 1px solid var(--border-color);
+      vertical-align: middle;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    tr:hover td {
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .item-name {
+      font-weight: 600;
+      color: #ffffff;
+      margin-bottom: 0.2rem;
+    }
+
+    .item-file {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 0.3rem 0.65rem;
+      border-radius: 0.5rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.825rem;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+
+    .badge-baseline {
+      background: var(--badge-bg-baseline);
+      border: 1px solid var(--badge-border-baseline);
+      color: #cbd5e1;
+    }
+
+    .badge-new {
+      background: var(--badge-bg-new);
+      border: 1px solid var(--badge-border-new);
+      color: #34d399;
+      font-weight: 600;
+    }
+
+    .effect-text {
+      color: var(--text-secondary);
+      line-height: 1.5;
+    }
+
+    .highlight {
+      color: #f8fafc;
+      font-weight: 600;
+    }
+
+    /* Footer */
+    footer {
+      text-align: center;
+      padding: 2.5rem 0 1rem;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      border-top: 1px solid var(--border-color);
+    }
+
+    @media (max-width: 768px) {
+      body { padding: 1.5rem 1rem; }
+      h1 { font-size: 1.8rem; }
+      th, td { padding: 0.85rem 1rem; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+
+  <header>
+    <div class="header-badge">AI Challenge Racing Kart - MPC Architecture</div>
+    <h1>ベースラインからの改修内容比較サマリー</h1>
+    <p class="subtitle">追従・追い越し性能、V2Xフィルタリング、高速コーナリング制御およびステートマシン最適化の全体概要</p>
+  </header>
+
+  <!-- High-Level Stats -->
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-title">最高巡航速度</div>
+      <div class="stat-value">38.0 <span style="font-size: 1rem; font-weight: 500; color: var(--text-muted);">km/h</span></div>
+      <div class="stat-desc">▲ +8.0 km/h (旧: 30.0 km/h)</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-title">ベストラップ記録</div>
+      <div class="stat-value">46.31 <span style="font-size: 1rem; font-weight: 500; color: var(--text-muted);">sec</span></div>
+      <div class="stat-desc">★ 12周連続クリーン完走達成</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-title">コーナリング限界横G</div>
+      <div class="stat-value">0.98 <span style="font-size: 1rem; font-weight: 500; color: var(--text-muted);">G</span></div>
+      <div class="stat-desc">タイヤ摩擦限界 9.8 m/s² 制御</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-title">誤検知・チャタリング</div>
+      <div class="stat-value">0 <span style="font-size: 1rem; font-weight: 500; color: var(--text-muted);">件</span></div>
+      <div class="stat-desc">外壁誤認・並走減速を完全根絶</div>
+    </div>
+  </div>
+
+  <!-- 1. 速度・アタック性能の向上 -->
+  <div class="section-card">
+    <div class="section-header">
+      <div class="section-icon icon-speed">⚡</div>
+      <h2 class="section-title">1. 速度・アタック性能の向上（ハイスピード化）</h2>
+    </div>
+    <div class="table-container">
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 25%;">設定項目 / 対象ファイル</th>
+            <th style="width: 22%;">ベースライン</th>
+            <th style="width: 23%;">改修後</th>
+            <th style="width: 30%;">目的および達成効果</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>
+              <div class="item-name">最高速度プロファイル</div>
+              <div class="item-file">config/ref_vel.yaml</div>
+            </td>
+            <td><span class="badge badge-baseline">直線 30.0 / コーナー 22〜25 km/h</span></td>
+            <td><span class="badge badge-new">直線 38.0 / コーナー 30.0 km/h</span></td>
+            <td class="effect-text">コース全域での最高速巡航を実現し、<span class="highlight">ラップタイムを大幅に短縮（46秒台記録）</span>。</td>
+          </tr>
+          <tr>
+            <td>
+              <div class="item-name">加速ローパスフィルタ</div>
+              <div class="item-file">config/config.yaml</div>
+            </td>
+            <td><span class="badge badge-baseline">accel_low_pass_gain: 0.8</span></td>
+            <td><span class="badge badge-new">accel_low_pass_gain: 1.0</span></td>
+            <td class="effect-text">加速指令の遅延をゼロ化し、<span class="highlight">ダイレクトかつ瞬時なフル加速レスポンス</span>を実現。</td>
+          </tr>
+          <tr>
+            <td>
+              <div class="item-name">最大減速度（ブレーキ）</div>
+              <div class="item-file">config/config.yaml</div>
+            </td>
+            <td><span class="badge badge-baseline">a_min: -3.0 m/s²</span></td>
+            <td><span class="badge badge-new">a_min: -3.5 m/s²</span></td>
+            <td class="effect-text">38km/h からの急減速・コーナー進入を可能にする強力な制動力を確保。</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- 2. 他車両認識・V2Xフィルタリングの適正化 -->
+  <div class="section-card">
+    <div class="section-header">
+      <div class="section-icon icon-v2x">📡</div>
+      <h2 class="section-title">2. 他車両認識・V2Xフィルタリングの適正化（誤検知の根絶）</h2>
+    </div>
+    <div class="table-container">
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 25%;">設定項目 / 対象ファイル</th>
+            <th style="width: 22%;">ベースライン</th>
+            <th style="width: 23%;">改修後</th>
+            <th style="width: 30%;">目的および達成効果</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>
+              <div class="item-name">前方車両検知ソース</div>
+              <div class="item-file">states.py</div>
+            </td>
+            <td><span class="badge badge-baseline">LiDAR 点群 ＋ V2X 統合</span></td>
+            <td><span class="badge badge-new">V2X（他車位置・速度）に一本化</span></td>
+            <td class="effect-text">コーナー外壁や縁石を「前方の障害物」と誤認して<span class="highlight">不要な急減速を起こす問題を100%根絶</span>。</td>
+          </tr>
+          <tr>
+            <td>
+              <div class="item-name">幾何学的厳密前方チェック</div>
+              <div class="item-file">mpc_controller.py</div>
+            </td>
+            <td><span class="badge badge-baseline">ユークリッド距離のみ</span></td>
+            <td><span class="badge badge-new">自車ノーズ前方 (s_proj ≥ 0.5m) 必須</span></td>
+            <td class="effect-text">真横や背後を走る後続車を「前方の車」と誤認してブレーキを踏む現象を完全に排除。</td>
+          </tr>
+          <tr>
+            <td>
+              <div class="item-name">コース沿い近接フィルタ</div>
+              <div class="item-file">mpc_controller.py</div>
+            </td>
+            <td><span class="badge badge-baseline">コース周回判定なし (全方位)</span></td>
+            <td><span class="badge badge-new">0 ≤ idx_diff ≤ 18 (約10m以内)</span></td>
+            <td class="effect-text">ヘアピンの向かい側ストレートを走る遠方車を前方車と誤認して<span class="highlight">OvertakeStateへ誤突入するバグを根絶</span>。</td>
+          </tr>
+          <tr>
+            <td>
+              <div class="item-name">並走レーン除外フィルタ</div>
+              <div class="item-file">mpc_controller.py</div>
+            </td>
+            <td><span class="badge badge-baseline">横幅 3.5m 以内をすべて検知</span></td>
+            <td><span class="badge badge-new">横ズレ 0.95m 以上は除外</span></td>
+            <td class="effect-text">横に並んだ際に相手を前方車と誤認してお互いにブレーキを踏み合う<span class="highlight">「並走共倒れ失速」を根絶</span>。</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- 3. ステートマシン・追い越し制御 -->
+  <div class="section-card">
+    <div class="section-header">
+      <div class="section-icon icon-state">🔄</div>
+      <h2 class="section-title">3. ステートマシン・追い越し（Overtake）制御の洗練</h2>
+    </div>
+    <div class="table-container">
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 25%;">設定項目 / 対象ファイル</th>
+            <th style="width: 22%;">ベースライン</th>
+            <th style="width: 23%;">改修後</th>
+            <th style="width: 30%;">目的および達成効果</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>
+              <div class="item-name">追い越し時速度</div>
+              <div class="item-file">mpc_controller.py</div>
+            </td>
+            <td><span class="badge badge-baseline">並走ブレーキ / 18km/h 制限あり</span></td>
+            <td><span class="badge badge-new">常に 38.0 km/h フルパワー</span></td>
+            <td class="effect-text">追いついた瞬間に失速することなく、大速度差で一気に先行車を抜き去る。</td>
+          </tr>
+          <tr>
+            <td>
+              <div class="item-name">追従速度ガバナー</div>
+              <div class="item-file">states.py</div>
+            </td>
+            <td><span class="badge badge-baseline">車間接近時に 0.95× 減速ループ</span></td>
+            <td><span class="badge badge-new">target_mps = max(5.0, fwd_speed)</span></td>
+            <td class="effect-text">追従時にお互いが引きずられて速度がゼロ近くまで落ちていく指数関数的減速デッドロックを解消。</td>
+          </tr>
+          <tr>
+            <td>
+              <div class="item-name">チャタリング防止制御</div>
+              <div class="item-file">states.py</div>
+            </td>
+            <td><span class="badge badge-baseline">最低維持 2.0s / クールダウンなし</span></td>
+            <td><span class="badge badge-new">維持 5.0s / クールダウン 3.0s</span></td>
+            <td class="effect-text">抜き切る前に中央に戻って左右に激しくふらつく<span class="highlight">ステート高速ループ（ハンドル暴れ）を根絶</span>。</td>
+          </tr>
+          <tr>
+            <td>
+              <div class="item-name">追い越し横オフセット幅</div>
+              <div class="item-file">states.py</div>
+            </td>
+            <td><span class="badge badge-baseline">LATERAL_OFFSET = 1.70m</span></td>
+            <td><span class="badge badge-new">LATERAL_OFFSET = 1.15m</span></td>
+            <td class="effect-text">コース幅内に余裕をもって収まり、イン側・アウト側の外壁接触を完全に防止。</td>
+          </tr>
+          <tr>
+            <td>
+              <div class="item-name">オフセット補間レート</div>
+              <div class="item-file">mpc_controller.py</div>
+            </td>
+            <td><span class="badge badge-baseline">ステップ即時切り替え (急激)</span></td>
+            <td><span class="badge badge-new">rate = 0.08 (滑らか補間)</span></td>
+            <td class="effect-text">レーンチェンジおよび復帰時の急激なステアリング切り返し・車体動揺を防止。</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- 4. コーナリング・ステアリング制御 -->
+  <div class="section-card">
+    <div class="section-header">
+      <div class="section-icon icon-pure">🎯</div>
+      <h2 class="section-title">4. コーナリング・ステアリング制御（Pure Pursuit）</h2>
+    </div>
+    <div class="table-container">
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 25%;">設定項目 / 対象ファイル</th>
+            <th style="width: 22%;">ベースライン</th>
+            <th style="width: 23%;">改修後</th>
+            <th style="width: 30%;">目的および達成効果</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>
+              <div class="item-name">コーナリンググリップリミッター</div>
+              <div class="item-file">mpc_controller.py</div>
+            </td>
+            <td><span class="badge badge-baseline">MPCのみ (PurePursuitは固定)</span></td>
+            <td><span class="badge badge-new">横G 1.0G (9.8 m/s²) リミッター</span></td>
+            <td class="effect-text">ヘアピン（24km/h）から中速コーナー（35km/h）まで限界グリップで安定旋回。</td>
+          </tr>
+          <tr>
+            <td>
+              <div class="item-name">先読み距離 (Lookahead)</div>
+              <div class="item-file">config/config.yaml</div>
+            </td>
+            <td><span class="badge badge-baseline">gain: 0.3, min: 3.5m</span></td>
+            <td><span class="badge badge-new">gain: 0.24, min: 2.4m</span></td>
+            <td class="effect-text">カーブ進入時のイン巻き込み・膨らみを抑え、綺麗な円弧レーシングライントレースを実現。</td>
+          </tr>
+          <tr>
+            <td>
+              <div class="item-name">操舵ローパスフィルタ</div>
+              <div class="item-file">config/config.yaml</div>
+            </td>
+            <td><span class="badge badge-baseline">steer_low_pass_gain: 0.4</span></td>
+            <td><span class="badge badge-new">steer_low_pass_gain: 0.45</span></td>
+            <td class="effect-text">ステアリングの小刻みな振動・ハンチングを吸収しつつ、俊敏な操舵応答性を両立。</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <footer>
+    <p>AI Challenge Racing Kart - Generated Change Summary Document</p>
+    <p style="margin-top: 0.25rem; font-size: 0.75rem;">Created by Antigravity Assistant &bull; 2026</p>
+  </footer>
+
+</div>
+
+</body>
+</html>

@@ -73,6 +73,10 @@ class StateManager:
     def current_gear(self) -> int:
         return self._current.gear
 
+    @property
+    def current_params(self) -> MPCStateParams:
+        return self._current.get_params()
+
     def update(self, ctx: StateContext) -> Optional[MPCStateParams]:
         """Evaluate transitions and return *new* params if state changed.
 

@@ -5,7 +5,10 @@ from typing import List
 
 import pytest
 
-from multi_purpose_mpc_ros.v2x_vehicle_tracker import V2XVehicleTracker
+try:
+    from multi_purpose_mpc_ros_with_dynamic_param.v2x_vehicle_tracker import V2XVehicleTracker
+except ImportError:
+    from multi_purpose_mpc_ros.v2x_vehicle_tracker import V2XVehicleTracker
 
 
 # Lightweight stand-ins for v2x_msgs / std_msgs / geometry_msgs so tests
@@ -151,7 +154,10 @@ class _StubObstacle:
 
 
 def test_predictions_to_obstacles_flattens_with_radius():
-    from multi_purpose_mpc_ros.v2x_vehicle_tracker import predictions_to_obstacles
+    try:
+        from multi_purpose_mpc_ros_with_dynamic_param.v2x_vehicle_tracker import predictions_to_obstacles
+    except ImportError:
+        from multi_purpose_mpc_ros.v2x_vehicle_tracker import predictions_to_obstacles
 
     predictions = {
         "d2": [(1.0, 2.0), (3.0, 4.0)],
@@ -169,7 +175,10 @@ def test_predictions_to_obstacles_flattens_with_radius():
 
 
 def test_predictions_to_obstacles_empty_input():
-    from multi_purpose_mpc_ros.v2x_vehicle_tracker import predictions_to_obstacles
+    try:
+        from multi_purpose_mpc_ros_with_dynamic_param.v2x_vehicle_tracker import predictions_to_obstacles
+    except ImportError:
+        from multi_purpose_mpc_ros.v2x_vehicle_tracker import predictions_to_obstacles
     assert predictions_to_obstacles(
         {}, vehicle_radius=0.5, obstacle_cls=_StubObstacle) == []
 
