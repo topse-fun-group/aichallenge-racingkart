@@ -1,31 +1,48 @@
+# Per-section speed CAP in km/h.
+#
+# The shape of the speed profile now comes from the raceline CSV's own vx_mps column
+# (see mpc.v_ref_scale / mpc.v_ref_min_kmh in config.yaml). These values only put a
+# ceiling on each section, so lowering one slows a section down while raising it lets
+# the CSV profile through unchanged.
+#
+# Initial values = each section's maximum CSV design speed, capped at mpc.v_max (45 km/h),
+# i.e. deliberately non-binding. Lower a section here when it needs to be slower than
+# the raceline design.
+#
+# Measured curvature per section (R_min = tightest radius):
+#   s1   wp   1- 30  R_min 7.6m    s1_1 wp  30- 55  R_min 21.6m
+#   s2   wp  55-100  R_min 5.2m    s3   wp 100-155  R_min 4.7m  <- tightest U-turn
+#   s4   wp 155-190  R_min 5.7m    s5   wp 190-265  R_min 4.7m  <- 3 S-curve inflections
+#   s6   wp 265-290  R_min 5.4m    s7   wp 290-320  R_min 8.4m
+#   s8   wp 320-335  R_min 7.0m    s9   wp 335-  1  R_min 8.1m
 ref_vel_configulator:
   s1:
-    ref_vel: 30.0
+    ref_vel: 45.0
     wp_id: 1
   s1_1:
-    ref_vel: 30.0
+    ref_vel: 45.0
     wp_id: 30
   s2:
-    ref_vel: 30.0
+    ref_vel: 45.0
     wp_id: 55
   s3:
-    ref_vel: 30.0
+    ref_vel: 45.0
     wp_id: 100
   s4:
-    ref_vel: 22.0
+    ref_vel: 45.0
     wp_id: 155
   s5:
-    ref_vel: 30.0
+    ref_vel: 41.0
     wp_id: 190
   s6:
-    ref_vel: 22.0
+    ref_vel: 35.0
     wp_id: 265
   s7:
-    ref_vel: 30.0
+    ref_vel: 42.0
     wp_id: 290
   s8:
-    ref_vel: 25.0
+    ref_vel: 43.0
     wp_id: 320
   s9:
-    ref_vel: 30.0
+    ref_vel: 45.0
     wp_id: 335

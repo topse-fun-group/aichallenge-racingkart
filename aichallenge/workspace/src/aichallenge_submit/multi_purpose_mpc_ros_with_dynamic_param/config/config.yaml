@@ -47,13 +47,28 @@ mpc:
   a_min: -3.5 # m/s^2 (ブレーキ強化で急カーブ対応)
   a_max: 3.0  # m/s^2 (加速力向上→30km/h超へ素早く到達)
   delta_max_deg: 32.0 # degrees
-  steer_rate_max: 0.35 # rad/s
+  # rad/s at the actuator. Was 0.35, which took 2.6 s to reach full lock and made the
+  # rate limiter — not the QP — the binding constraint on steering. The tightest S-curve
+  # on this track (wp~279, two opposite U-turns 4 m apart) needs ~0.83 rad/s at 28 km/h.
+  # Raise in steps (1.2 -> 1.6 -> 2.0) and stop before oscillation appears.
+  steer_rate_max: 1.2
   control_rate: 40.0 # Hz
   steering_tire_angle_gain_var: 1.639
   accel_low_pass_gain: 0.8
   steer_low_pass_gain: 0.4
-  wp_id_offset: 2
+  wp_id_offset: 3
   use_max_kappa_pred: true
+
+  # Reference velocity profile (built once at startup from the raceline CSV's vx_mps column)
+  v_ref_scale: 1.0      # global multiplier on the CSV design speed (lap-time tuning)
+  v_ref_min_kmh: 31.0   # floor, so tight apexes are not crawled through default 30.0
+
+  # Lower bound on the speed the spatial model is linearised about [m/s].
+  # NOT a lower bound on the commanded speed. The model divides by this speed
+  # (b_3 = -delta_s/v^2), so letting it follow v_ref down to 0 while following a slow
+  # leader swings the B matrix by ~625x and then jumps discontinuously at exactly 0,
+  # which corrupts the lateral solution.
+  v_lin_min: 4.0 # default 3.0
 
 
   ## ---------- 究極 ------------- ##
@@ -88,7 +103,7 @@ mpc:
   # QN: [1000000.0, 1000.0, 10000.0]
 
   ## --------- カスタム ------------ ##
-  v_max: 35.0
+  v_max: 55.0 # default 45.0
   ay_max: 9.5
   Q: [1000000.0, 100000000.0, 850000.0] # 中高速プリセット
   QN: [1000000.0, 1000.0, 10000.0]
@@ -113,5 +128,14 @@ pure_pursuit:
   speed_proportional_gain: 80.0
   use_external_target_vel: false
   external_target_vel: 10.0
-  steering_tire_angle_gain: 1.5
-  speed_scale_factor: 1.2
+  steering_tire_angle_gain: 1.1  # lowered from 1.5: the curvature-adaptive lookahead below
+                                 # shortens Ld in corners, which raises the geometric demand
+  speed_scale_factor: 1.0        # was 1.2; v_ref is now the real design profile
+
+  # Lookahead is computed from the measured speed, then shortened by the upcoming
+  # curvature. On this track the S-curves are tight U-turns separated by only 4-10 m,
+  # so a fixed 8 m lookahead spans the whole inflection and commands near-zero steering.
+  lookahead_min_speed: 3.0                # [m/s] floor for the Ld speed term
+  curvature_lookahead_shrink: 3.0         # Ld *= 1 - shrink * |kappa_ahead|
+  curvature_lookahead_min_ratio: 0.45     # lower bound on that ratio
+  lookahead_hard_min: 3.0                 # [m] absolute floor on Ld

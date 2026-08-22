@@ -84,14 +84,14 @@ class StateManager:
         next_name = self._current.check_transition(ctx)
 
         if next_name is None or next_name == self._current.name:
-            self._publish_state()
+            self._publish_state(ctx)
             return None
 
         # Enforce minimum dwell-time (Recovery is exempt)
         if next_name != "recovery" and self._last_transition_time is not None:
             dwell = ctx.current_time_sec - self._last_transition_time
             if dwell < self.MIN_DWELL_TIME:
-                self._publish_state()
+                self._publish_state(ctx)
                 return None
 
         # Validate target state exists
@@ -112,7 +112,7 @@ class StateManager:
         self._logger.info(
             f"[StateManager] {prev_name} → {self._current.name}"
         )
-        self._publish_state()
+        self._publish_state(ctx)
 
         return self._current.get_params()
 
@@ -124,7 +124,14 @@ class StateManager:
     # internal
     # ------------------------------------------------------------------
 
-    def _publish_state(self) -> None:
+    def _publish_state(self, ctx: StateContext) -> None:
         msg = String()
-        msg.data = self._current.name
+        tmp_vs = ctx.velocity if ctx.velocity is not None else 0.0
+        tmp_fvd = ctx.forward_vehicle_distance if ctx.forward_vehicle_distance is not None else 0.0
+        tmp_fvs = ctx.forward_vehicle_speed if ctx.forward_vehicle_speed is not None else 0.0
+        tmp_owl = ctx.overtake_width_left if ctx.overtake_width_left is not None else 0.0
+        tmp_owr = ctx.overtake_width_right if ctx.overtake_width_right is not None else 0.0
+        tmp_mow = ctx.min_forward_overtake_width if ctx.min_forward_overtake_width is not None else 0.0
+        msg.data = f"[status]: {self._current.name}, [d]: {tmp_fvd:.2f}, [v/fv]: {tmp_vs:.2f}/{tmp_fvs:.2f}, [w_l]: {tmp_owl:.2f}, [w_r]: {tmp_owr:.2f}, [min_overtake_w]: {tmp_mow:.2f}, [has_forward]: {ctx.has_forward_vehicle}"
+        # msg.data = self._current.name
         self._state_pub.publish(msg)
