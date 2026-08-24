@@ -907,15 +907,31 @@ class MPCController(Node):
             if self._state_manager.current_state.name == "overtake":
                 overtake_params = self._state_manager.current_state.get_params()
                 full_overtake_v = kmh_to_m_per_sec(float(overtake_params.v_max))
-                # Safety guard while transitioning into open lane (only for high-speed leader)
+                # Safety guard while transitioning into open lane across all leader speeds (stopped, slow, fast)
                 ctx_ot = self._build_state_context(0.02, False)
                 fwd_d = ctx_ot.forward_vehicle_distance
                 fwd_spd = ctx_ot.forward_vehicle_speed
-                if fwd_d is not None and fwd_d < 4.0 and abs(self._current_lateral_offset) < 0.8 and (fwd_spd is not None and fwd_spd >= 6.0):
-                    safe_approach_v = fwd_spd + kmh_to_m_per_sec(4.0)  # smooth approach speed
+                offset_threshold = max(0.45, 0.65 * abs(self._target_lateral_offset))
+                if fwd_d is not None and fwd_d < 4.5 and abs(self._current_lateral_offset) < offset_threshold:
+                    if fwd_spd is None or fwd_spd < 1.0:
+                        # Stopped obstacle: approach at 15.0 km/h until lateral offset is cleared
+                        safe_approach_v = kmh_to_m_per_sec(15.0)
+                    elif fwd_spd < 6.0:
+                        # Low-speed / recovering vehicle: approach at leader + 4.0 km/h
+                        safe_approach_v = fwd_spd + kmh_to_m_per_sec(4.0)
+                    else:
+                        # High-speed racing leader: hold leader speed until lane cleared
+                        safe_approach_v = fwd_spd + kmh_to_m_per_sec(1.0)
                     target_longitudinal_vel = min(full_overtake_v, safe_approach_v)
                 else:
                     target_longitudinal_vel = full_overtake_v
+
+                # Corner speed cap during overtake: ONLY in true sharp corners (base_v_mps <= 28.0 km/h or high curvature)
+                # On straights (base_v_mps >= 29 km/h), maintain full 38.0 km/h overtake acceleration!
+                if base_v_mps <= kmh_to_m_per_sec(28.0):
+                    target_longitudinal_vel = min(target_longitudinal_vel, base_v_mps + kmh_to_m_per_sec(1.0))
+                elif abs(ctx_ot.path_kappa) >= 0.050 or ctx_ot.future_max_kappa >= 0.055:
+                    target_longitudinal_vel = min(target_longitudinal_vel, kmh_to_m_per_sec(26.5))
 
             lookahead_distance = lookahead_gain * target_longitudinal_vel + lookahead_min
             rear_x = pose.x - (wheel_base / 2.0) * np.cos(pose.theta)
@@ -1316,27 +1332,25 @@ class MPCController(Node):
                     follow_v_max_mps = kmh_to_m_per_sec(current_state.get_adjusted_v_max_kmh(ctx))
                     v_target = min(v_target, follow_v_max_mps)
                 elif isinstance(current_state, OvertakeState):
-                    # Parallel offset rocket attack speed:
                     # In sharp hairpins (abs(path_kappa) >= 0.070), limit to 24 km/h for crisp cornering without understeering into walls.
-                    # In straights and fast sections, UNLEASH full 38.0 km/h power!
+                    # In other sections, respect v_target computed by _compute_pure_pursuit_control (which incorporates approach speed & full overtake speed).
                     if abs(ctx.path_kappa) >= 0.070:
-                        v_target = kmh_to_m_per_sec(24.0)
-                    else:
-                        v_target = kmh_to_m_per_sec(38.0)
+                        v_target = min(v_target, kmh_to_m_per_sec(24.0))
                 u = [v_target, steer_target]
                 max_delta = steer_target
             else:
                 with self._stats.time_block("control"):
                     u, max_delta = self._mpc.get_control()
 
-            # FollowState uses dynamic following speed; OvertakeState uses full 38 km/h speed (24 km/h in hairpins)
+            # FollowState uses dynamic following speed; OvertakeState updates reference path
             if isinstance(current_state, OvertakeState):
                 target_ot_kmh = 24.0 if abs(ctx.path_kappa) >= 0.070 else 38.0
                 v_max_mps = kmh_to_m_per_sec(target_ot_kmh)
                 self._mpc.update_v_max(v_max_mps)
                 v_ref_list: List[float] = [v_max_mps] * len(self._reference_path.waypoints)
                 self._reference_path.set_v_ref(v_ref_list)
-                u[0] = v_max_mps
+                if current_state.control_mode != ControlMode.PURE_PURSUIT:
+                    u[0] = v_max_mps
             elif self._ref_vel_configulator is not None and not isinstance(current_state, FollowState):
                 ref_vel_mps = self._ref_vel_configulator.get_ref_vel(self._mpc.model.wp_id)
                 ref_vel_mps_capped = min(ref_vel_mps, self._mpc_cfg.v_max)

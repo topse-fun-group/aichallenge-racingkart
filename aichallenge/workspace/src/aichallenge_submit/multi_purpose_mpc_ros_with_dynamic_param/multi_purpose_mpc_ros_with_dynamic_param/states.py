@@ -225,13 +225,13 @@ class FollowPathState(DrivingState):
             is_leader_recovering = (ctx.forward_vehicle_speed is not None and ctx.forward_vehicle_speed < 5.0)
 
             if is_leader_stopped:
-                # True stopped obstacle: bypass anywhere on track
+                # True stopped obstacle: bypass anywhere on track immediately (0.0 m/s speed req)
                 can_overtake = has_basic_clearance
-                min_speed_req = 0.5
+                min_speed_req = 0.0
             elif is_leader_recovering:
                 # Recovering / slow vehicle: pass if wide space (even in hairpins!) or basic space in normal zones
                 can_overtake = has_wide_clearance or (has_basic_clearance and not is_hairpin)
-                min_speed_req = 0.5
+                min_speed_req = 0.0
             else:
                 # Dynamic racing overtake mode: pass if wide space (even in hairpins!) or straights
                 can_overtake = has_wide_clearance or (has_basic_clearance and not is_hairpin and not is_braking_zone and is_straight)
@@ -321,13 +321,20 @@ class RecoveryState(DrivingState):
         if back_elapsed < self.MIN_BACK_DURATION:
             return None
 
+        # Helper to decide exit state (if obstacle is ahead, bypass directly to overtake lane)
+        def _get_recovery_exit_state() -> str:
+            eff_dist = _get_effective_forward_distance(ctx)
+            if eff_dist is not None and eff_dist < 9.5 and max(ctx.overtake_width_left, ctx.overtake_width_right) > 2.20:
+                return "overtake"
+            return "follow_path"
+
         # 1. Reverse stuck detection: if hit a rear wall after full reverse attempt, switch to forward
         if back_elapsed >= 1.8 and abs(ctx.velocity) < 0.12:
-            return "follow_path"
+            return _get_recovery_exit_state()
 
         # 2. Rejoin path once min back duration completed or max reached
         if back_elapsed >= self.MAX_BACK_DURATION or (ctx.path_deviation < self.PATH_DEVIATION_THRESHOLD and back_elapsed >= self.MIN_BACK_DURATION):
-            return "follow_path"
+            return _get_recovery_exit_state()
 
         return None
 
@@ -427,13 +434,13 @@ class FollowState(DrivingState):
         is_leader_recovering = (ctx.forward_vehicle_speed is not None and ctx.forward_vehicle_speed < 5.0)
 
         if is_leader_stopped:
-            # True stopped obstacle: bypass anywhere on track
+            # True stopped obstacle: bypass anywhere on track immediately (0.0 m/s speed req)
             can_overtake = has_basic_clearance
-            min_speed_req = 0.5
+            min_speed_req = 0.0
         elif is_leader_recovering:
             # Recovering / slow vehicle: pass if wide space (even in hairpins!) or basic space in normal zones
             can_overtake = has_wide_clearance or (has_basic_clearance and not is_hairpin)
-            min_speed_req = 0.5
+            min_speed_req = 0.0
         else:
             # Dynamic racing overtake mode: pass if wide space (even in hairpins!) or straights
             can_overtake = has_wide_clearance or (has_basic_clearance and not is_hairpin and not is_braking_zone and is_straight)
@@ -493,8 +500,8 @@ class FollowState(DrivingState):
             else:  # Closing in too fast: progressively brake to prevent ramming
                 target_mps = fwd_speed * (0.65 + 0.35 * dist_factor) - 0.4 * (rel_speed - 0.8)
 
-            # Minimum speed floor: never drop more than 1.0 m/s below moving leader
-            if fwd_speed > 3.5:
+            # Minimum speed floor: never drop more than 1.0 m/s below moving leader (applies to all moving leaders > 1.0 m/s)
+            if fwd_speed > 1.0:
                 target_mps = max(target_mps, fwd_speed - 1.0)
         else:
             # Normal following zone (>= 5.5m): smoothly approach leader
@@ -556,9 +563,16 @@ class OvertakeState(DrivingState):
         self._is_boost = (ctx.current_laps >= 5)
         v_max = self.V_MAX_BOOST if self._is_boost else self.V_MAX_NORMAL
 
-        # 100% Truth-based side selection using REAL measured open clearances:
-        # Choose whichever side has MORE actual open space between leader and track border!
-        if right_space >= left_space:
+        # Lane continuity hysteresis to avoid crossing directly behind/into leader:
+        # If ego is already on the left (path_e_y > 0.20m) and left_space is sufficient (>= 1.80m), stay on LEFT!
+        # If ego is already on the right (path_e_y < -0.20m) and right_space is sufficient (>= 1.80m), stay on RIGHT!
+        if ctx.path_e_y > 0.20 and left_space >= 1.80:
+            self._overtake_side = "left"
+            chosen_space = left_space
+        elif ctx.path_e_y < -0.20 and right_space >= 1.80:
+            self._overtake_side = "right"
+            chosen_space = right_space
+        elif right_space >= left_space:
             self._overtake_side = "right"
             chosen_space = right_space
         else:
@@ -566,28 +580,33 @@ class OvertakeState(DrivingState):
             chosen_space = left_space
 
         # Dynamic max offset clipping:
-        # Offset is carefully scaled, guaranteeing >= 1.35m wall buffer!
         abs_k = abs(ctx.path_kappa)
         is_straight_zone = (abs_k < 0.035) or ctx.is_approaching_straight
 
-        if is_straight_zone:
-            max_allowable_offset = 1.40
-            min_allowable_offset = 1.25
-            ratio = 0.45
-        elif abs_k < 0.055:
-            max_allowable_offset = 1.35
-            min_allowable_offset = 1.20
-            ratio = 0.42
-        else:
-            max_allowable_offset = 1.30
-            min_allowable_offset = 1.15
-            ratio = 0.40
+        # Check if chosen side is on the INSIDE of a curve:
+        # - Left turn (kappa > +0.015) with Left offset -> Inside apex
+        # - Right turn (kappa < -0.015) with Right offset -> Inside apex
+        # - Approaching corner with high curvature on inside
+        is_inside_corner = (ctx.path_kappa > 0.015 and self._overtake_side == "left") or \
+                           (ctx.path_kappa < -0.015 and self._overtake_side == "right") or \
+                           (ctx.future_max_kappa >= 0.045 and not is_straight_zone)
 
-        # Strictly clip to avoid exceeding wall boundary
-        safe_offset = float(np.clip(chosen_space * ratio, min_allowable_offset, max_allowable_offset))
-        # Ensure offset leaves at least 1.35m margin to the wall
-        safe_offset = min(safe_offset, chosen_space - 1.35)
-        safe_offset = max(safe_offset, 1.15)
+        if is_inside_corner:
+            # On the inside of a curve, raceline is already apex-clipping close to the inner wall (0.8m - 1.2m).
+            # Strictly limit the inside offset (0.60m - 0.80m) to avoid diving into the inner curb/wall!
+            max_allowable_offset = 0.80
+            min_allowable_offset = 0.60
+            safe_offset = float(np.clip(chosen_space * 0.20, min_allowable_offset, max_allowable_offset))
+        elif is_straight_zone:
+            # On straights: cap offset at 0.85m to ensure >= 1.0m clearance from the outer wall
+            max_allowable_offset = 0.85
+            min_allowable_offset = 0.70
+            safe_offset = float(np.clip(chosen_space * 0.20, min_allowable_offset, max_allowable_offset))
+        else:
+            # Outside line of a curve: cap offset at 0.80m
+            max_allowable_offset = 0.80
+            min_allowable_offset = 0.65
+            safe_offset = float(np.clip(chosen_space * 0.20, min_allowable_offset, max_allowable_offset))
 
         if self._overtake_side == "right":
             self._calculated_offset = -safe_offset
@@ -641,7 +660,7 @@ class OvertakeState(DrivingState):
             is_side_by_side = (x_rel is not None and -4.0 <= x_rel <= 4.0)
             if elapsed >= self.MAX_OVERTAKE_DURATION and not is_side_by_side and not is_braking_zone:
                 return "follow_path"
-            if elapsed >= 9.0:  # Absolute failsafe timeout
+            if elapsed >= 9.0 and not is_side_by_side:  # Failsafe timeout only when safe to return
                 return "follow_path"
 
         return None
