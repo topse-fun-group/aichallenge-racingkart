@@ -1036,7 +1036,7 @@ class MPCController(Node):
 
             # S字カーブ生成のための Hann 窓シフト処理
             # N_SHIFT = 35 # 35pointでだいたい35m
-            N_SHIFT = 8 # int(ctx.forward_vehicle_gap)
+            N_SHIFT = 7 # int(ctx.forward_vehicle_gap) (default: 8)
             wps = self._reference_path.waypoints
             n_wps = len(wps)
 
@@ -1310,8 +1310,8 @@ class MPCController(Node):
         wp = self._reference_path.waypoints[closest_idx]
 
         # Waypoint bounds (left is positive, right is negative)
-        ub = float(wp.ub) if wp.ub is not None else 3.0
-        lb = float(wp.lb) if wp.lb is not None else -3.0
+        ub = float(wp.ub) if wp.ub is not None else 3.0  # 3.0
+        lb = float(wp.lb) if wp.lb is not None else -3.0 # 3.0
 
         # Leader lateral position e_y relative to waypoint centerline
         path_psi = float(wp.psi)

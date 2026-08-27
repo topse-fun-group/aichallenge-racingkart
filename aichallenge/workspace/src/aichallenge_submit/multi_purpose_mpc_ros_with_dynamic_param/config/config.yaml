@@ -108,8 +108,8 @@ v2x_obstacle_avoidance:
 
 pure_pursuit:
   wheel_base: 1.087
-  lookahead_gain: 0.3
-  lookahead_min_distance: 3.5
+  lookahead_gain: 0.3            # 0.3
+  lookahead_min_distance: 3.3    # 3.5
   speed_proportional_gain: 80.0
   use_external_target_vel: false
   external_target_vel: 10.0
