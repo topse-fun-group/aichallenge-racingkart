@@ -1025,13 +1025,17 @@ class MPCController(Node):
                 self._mpc.model.wp_id = closest_idx
 
             # センターライン基準の目標横オフセット（空き空間の中心）を取得
+            # 壁からのマージン0.5mを先行車両の左右の空き幅から引いて半分にした値を
+            # 先行車両の横端からの追い越しラインとする。実際の座標はセンターラインから
+            # 先行車両の車幅の半分の最大0.725m未満+先行車両との横マージン0.225mだけ
+            # ずらした位置が実際の追い越し時の座標になる
             target_offset = ctx.target_overtake_offset
             if abs(target_offset) > 0.1:
                 is_left = (ctx.overtake_width_left >= ctx.overtake_width_right)
                 # target_offset = 1.6 if is_left else -1.6
                 target_offset = (
-                    ((ctx.overtake_width_left - 0.5) / 2.0) + 0.725
-                    if is_left else -(((ctx.overtake_width_right - 0.5) / 2.0) + 0.725)
+                    ((ctx.overtake_width_left - 0.5) / 2.0) + 0.725 + 0.225
+                    if is_left else -(((ctx.overtake_width_right - 0.5) / 2.0) + 0.725 + 0.225)
                 )
 
             # S字カーブ生成のための Hann 窓シフト処理
