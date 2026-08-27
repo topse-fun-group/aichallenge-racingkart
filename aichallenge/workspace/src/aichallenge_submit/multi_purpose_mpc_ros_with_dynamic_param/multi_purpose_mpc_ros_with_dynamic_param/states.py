@@ -156,7 +156,7 @@ class StateContext:
     # boost送信コールバック (1.0: ON, 0.0: OFF)
     # boost使用時に以下をコメントアウト。
     # 現状は不安定もしくは効果が薄いのでコメントアウト
-    # publish_boost: Optional[Callable[[float], None]] = None
+    publish_boost: Optional[Callable[[float], None]] = None
 
 class DrivingState(ABC):
     """Base class for all driving states (State pattern)."""
@@ -829,11 +829,11 @@ class OvertakeState(DrivingState):
         self._was_alongside = False
         self._passed = False
 
-        # ブースト開始 (1.0 をパブリッシュ)
+        # boost開始 (1.0 をパブリッシュ)
         # boost使用時に以下をコメントアウト。
         #----------------------------------
-        # if ctx.publish_boost is not None:
-        #     ctx.publish_boost(1.1)
+        if ctx.publish_boost is not None:
+            ctx.publish_boost(1.5)
 
         # ReferencePath から計算された空き領域の真ん中を通る動的オフセットを採用
         if abs(ctx.target_overtake_offset) > 0.1:
@@ -853,11 +853,11 @@ class OvertakeState(DrivingState):
         self._was_alongside = False
         self._passed = False
 
-        # ブースト解除 (0.0 をパブリッシュ)
+        # boost解除 (0.0 をパブリッシュ)
         # boost使用時に以下をコメントアウト。
         #----------------------------------
-        # if ctx.publish_boost is not None:
-        #     ctx.publish_boost(0.0)
+        if ctx.publish_boost is not None:
+            ctx.publish_boost(0.0)
 
     def _update_passed(self, ctx: StateContext) -> bool:
         """前車が自車より後ろに出たか。一度 True になったらラッチする。"""

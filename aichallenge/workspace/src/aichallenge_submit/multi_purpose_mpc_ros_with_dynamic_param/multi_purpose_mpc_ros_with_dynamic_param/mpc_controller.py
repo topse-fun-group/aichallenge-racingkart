@@ -677,17 +677,17 @@ class MPCController(Node):
             self._v2x_callback,
             1)
 
-    #     # AWSIM ブーストコマンド用パブリッシャ (/awsim/cmd)
-    #     self._awsim_boost_pub = self.create_publisher(
-    #         Float32MultiArray, "/awsim/cmd", 10
-    #     )
+        # AWSIM boostコマンド用パブリッシャ (/awsim/cmd)
+        self._awsim_boost_pub = self.create_publisher(
+            Float32MultiArray, "/awsim/cmd", 10
+        )
 
-    # def _publish_boost(self, boost_value: float) -> None:
-    #     """AWSIM ブーストコマンド (/awsim/cmd) を送信する."""
-    #     msg = Float32MultiArray()
-    #     msg.data = [float(boost_value)]
-    #     self._awsim_boost_pub.publish(msg)
-    #     # self.get_logger().info(f"[AWSIM Boost] Published boost command: {boost_value}")
+    def _publish_boost(self, boost_value: float) -> None:
+        """AWSIM ブーストコマンド (/awsim/cmd) を送信する."""
+        msg = Float32MultiArray()
+        msg.data = [float(boost_value)]
+        self._awsim_boost_pub.publish(msg)
+        # self.get_logger().info(f"[AWSIM Boost] Published boost command: {boost_value}")
 
     def _create_ackerman_control_command(self, stamp, u, acc, bug_acc_enabled):
         v_cmd = u[0]
@@ -1519,7 +1519,7 @@ class MPCController(Node):
             time_stopped_sec=time_stopped,
             is_in_recovery_cooldown=is_cooldown,
             # boost使用時に以下をコメントアウト。
-            # publish_boost=self._publish_boost,
+            publish_boost=self._publish_boost,
         )
 
     def _apply_state_params(self, params: MPCStateParams) -> None:
