@@ -1520,7 +1520,7 @@ class MPCController(Node):
         fwd_heading_diff = 0.0
         if fwd_heading is not None:
             diff = (fwd_heading - path_psi + np.pi) % (2 * np.pi) - np.pi
-            fwd_heading_diff = float(abs(diff))
+            fwd_heading_diff = float(diff)
 
         return StateContext(
             current_time_sec=now_sec,

@@ -56,7 +56,7 @@ SIDE_VEHICLE_ANGLE_MAX_DEG = 90.0  # [deg] 横最大検知角度
 # ---------------------------------------------------------------------------
 D0_M                        = 1.0   # [m] 追従時の停止目標車間距離 (default: 1.5)
 TIME_HEADWAY_SEC            = 0.35  # [s] 追従時に車間距離を縮める期待時間 (default: 0.35)
-FORWARD_FOLLOW_DISTANCE_M   = 4.0   # [m] 追従を行う前方車両との車間距離
+FORWARD_FOLLOW_DISTANCE_M   = 5.0   # [m] 追従を行う前方車両との車間距離 (default: 4.0)
 FOLLOW_CLEAR_HYSTERESIS_SEC = 1.0   # [s] 追従状態を維持する最低時間 (チャタリング防止)
 FOLLOW_STOP_DISTANCE_M      = 0.8   # [m] (完全停止・ブレーキ閾値、遅延を考慮)
 FOLLOW_K_GAP                = 1.4   # [1/s] ギャップ誤差 → 速度
@@ -68,7 +68,7 @@ FOLLOW_TARGET_DISTANCE_M    = 3.0
 # ---------------------------------------------------------------------------
 # overtake state parameter
 # ---------------------------------------------------------------------------
-MIN_OVERTAKE_WIDTH_M      = 3.0     # [m] 最低追い越し幅 default 2.5
+MIN_OVERTAKE_WIDTH_M      = 3.2     # [m] 最低追い越し幅 (default 2.5)
 MIN_OVERTAKE_LEAD_SPEED   = 25.0    # [km/s] 前方車両の最低追い越し速度
 OVERTAKE_CLOSING_MARGIN_M = 1.0     # [m] 追い越し時の車間距離の余裕距離
 OVERTAKE_TTC_SEC          = 0.3     # [s] TTCの時間
@@ -288,9 +288,12 @@ class FollowPathState(DrivingState):
 
 
             #--------------------------------- version 2 ---------------------------------
+            is_left = ctx.overtake_width_left > ctx.overtake_width_right
+            is_same_lane = (ctx.path_e_y > 0 and is_left) or (ctx.path_e_y < 0 and not is_left)
+            lead_speed = ctx.forward_vehicle_speed if ctx.forward_vehicle_speed is not None else 0.0
             is_overtake_gap = (
                 (ctx.forward_vehicle_gap + VEHICLE_LENGTH * 1.5 + OVERTAKE_CLOSING_MARGIN_M)
-                <= 2.0 * (ctx.velocity - ctx.forward_vehicle_speed)
+                <= 0.4 * (ctx.velocity - lead_speed)
             )
             heading_diff = (
                 ctx.forward_vehicle_heading_diff
@@ -301,30 +304,31 @@ class FollowPathState(DrivingState):
             if ctx.overtake_width_left > ctx.overtake_width_right:
                 if heading_diff > 0.0:
                     has_future_width = (
-                        ctx.overtake_width_left - 1.1 - (
-                            1.5 * lead_speed * np.sin(heading_diff)
+                        ctx.overtake_width_left - (
+                            (0.5 * 0.4**2 + 0.4 * lead_speed) * np.sin(heading_diff)
                         ) >= MIN_OVERTAKE_WIDTH_M)
                 elif heading_diff < 0.0:
                     has_future_width = (
-                        ctx.overtake_width_left - 1.1 + (
-                            1.5 * lead_speed * np.sin(heading_diff)
+                        ctx.overtake_width_left + (
+                            (0.5 * 0.4**2 + 0.4 * lead_speed) * np.sin(heading_diff)
                         ) >= MIN_OVERTAKE_WIDTH_M)
             elif ctx.overtake_width_left < ctx.overtake_width_right:
                 if heading_diff > 0.0:
                     has_future_width = (
-                        ctx.overtake_width_right - 1.1 + (
-                            1.5 * lead_speed * np.sin(heading_diff)
+                        ctx.overtake_width_right + (
+                            (0.5 * 0.4**2 + 0.4 * lead_speed) * np.sin(heading_diff)
                         ) >= MIN_OVERTAKE_WIDTH_M)
-                elif heading_diff < 0.0:
+                if heading_diff < 0.0:
                     has_future_width = (
-                        ctx.overtake_width_right - 1.1 - (
-                            1.5 * lead_speed * np.sin(heading_diff)
+                        ctx.overtake_width_right - (
+                            (0.5 * 0.4**2 + 0.4 * lead_speed) * np.sin(heading_diff)
                         ) >= MIN_OVERTAKE_WIDTH_M)
 
             if (
                 is_overtake_gap
                 and ctx.min_forward_overtake_width >= MIN_OVERTAKE_WIDTH_M
                 and has_future_width
+                and is_same_lane
             ):
                 return "overtake"
             #--------------------------------- version 2 ---------------------------------
@@ -389,6 +393,8 @@ class FollowPathState(DrivingState):
             and ctx.forward_vehicle_distance < FORWARD_VEHICLE_DETECTION
         ):
             if ctx.forward_vehicle_distance <= FORWARD_FOLLOW_DISTANCE_M:
+                is_left = ctx.overtake_width_left > ctx.overtake_width_right
+                is_same_lane = (ctx.path_e_y > 0 and is_left) or (ctx.path_e_y < 0 and not is_left)
 
                 # 先行車両の速度
                 lead_speed = (
@@ -408,7 +414,7 @@ class FollowPathState(DrivingState):
                 is_closing = speed_diff >= (
                     (
                         ctx.forward_vehicle_gap + VEHICLE_LENGTH + OVERTAKE_CLOSING_MARGIN_M
-                    ) / 0.35)
+                    ) / 0.75)
 
                 # 車間距離が(停止車間距離 + 瞬間詰め距離 + オフセット距離)以下であるかどうか
                 is_settled_behind = (
@@ -427,24 +433,24 @@ class FollowPathState(DrivingState):
                 if ctx.overtake_width_left > ctx.overtake_width_right:
                     if heading_diff > 0.0:
                         has_future_width = (
-                            ctx.overtake_width_left - 1.1 - (
-                                0.35 * lead_speed * np.sin(heading_diff)
+                            ctx.overtake_width_left - (
+                                (0.5 * 0.4**2 + 0.4 * lead_speed) * np.sin(heading_diff)
                             ) >= MIN_OVERTAKE_WIDTH_M)
                     elif heading_diff < 0.0:
                         has_future_width = (
-                            ctx.overtake_width_left - 1.1 + (
-                                0.35 * lead_speed * np.sin(heading_diff)
+                            ctx.overtake_width_left + (
+                                (0.5 * 0.4**2 + 0.4 * lead_speed) * np.sin(heading_diff)
                             ) >= MIN_OVERTAKE_WIDTH_M)
                 elif ctx.overtake_width_left < ctx.overtake_width_right:
                     if heading_diff > 0.0:
                         has_future_width = (
-                            ctx.overtake_width_right - 1.1 + (
-                                0.35 * lead_speed * np.sin(heading_diff)
+                            ctx.overtake_width_right + (
+                                (0.5 * 0.4**2 + 0.4 * lead_speed) * np.sin(heading_diff)
                             ) >= MIN_OVERTAKE_WIDTH_M)
-                    elif heading_diff < 0.0:
+                    if heading_diff < 0.0:
                         has_future_width = (
-                            ctx.overtake_width_right - 1.1 - (
-                                0.35 * lead_speed * np.sin(heading_diff)
+                            ctx.overtake_width_right - (
+                                (0.5 *0.4**2 + 0.4 * lead_speed) * np.sin(heading_diff)
                             ) >= MIN_OVERTAKE_WIDTH_M)
 
                 if (
@@ -454,6 +460,7 @@ class FollowPathState(DrivingState):
                     and is_slow_leader
                     and is_ttc_close
                     and has_future_width
+                    and is_same_lane
                 ):
                     return "overtake"
                 return "follow"
@@ -669,6 +676,9 @@ class FollowState(DrivingState):
         #--------------------------------- version 1 ---------------------------------
 
         #--------------------------------- version 2 ---------------------------------
+        is_left = ctx.overtake_width_left > ctx.overtake_width_right
+        is_same_lane = (ctx.path_e_y > 0 and is_left) or (ctx.path_e_y < 0 and not is_left)
+        has_long_gap = ctx.forward_vehicle_distance > 3.5 if ctx.forward_vehicle_distance is not None else False
 
         # 先行車両の速度
         lead_speed = ctx.closest_forward_vehicle_speed if ctx.closest_forward_vehicle_speed is not None else 0.0
@@ -688,7 +698,7 @@ class FollowState(DrivingState):
         is_closing = speed_diff >= (
             (
                 ctx.forward_vehicle_gap + VEHICLE_LENGTH + OVERTAKE_CLOSING_MARGIN_M
-            ) / 0.35
+            ) / 0.5
         )
 
         # 車間距離が(停止車間距離 + 瞬間詰め距離 + オフセット距離)以下であるかどうか
@@ -708,24 +718,24 @@ class FollowState(DrivingState):
         if ctx.overtake_width_left > ctx.overtake_width_right:
             if heading_diff > 0.0:
                 has_future_width = (
-                    ctx.overtake_width_left - 1.1 - (
-                        0.35 * lead_speed * np.sin(heading_diff)
+                    ctx.overtake_width_left - (
+                        (0.5 * 0.75**2 + 0.75 * lead_speed) * np.sin(heading_diff)
                     ) >= MIN_OVERTAKE_WIDTH_M)
             elif heading_diff < 0.0:
                 has_future_width = (
-                    ctx.overtake_width_left - 1.1 + (
-                        0.35 * lead_speed * np.sin(heading_diff)
+                    ctx.overtake_width_left + (
+                        (0.5 * 0.75**2 + 0.75 * lead_speed) * np.sin(heading_diff)
                     ) >= MIN_OVERTAKE_WIDTH_M)
         elif ctx.overtake_width_left < ctx.overtake_width_right:
             if heading_diff > 0.0:
                 has_future_width = (
-                    ctx.overtake_width_right - 1.1 + (
-                        0.35 * lead_speed * np.sin(heading_diff)
+                    ctx.overtake_width_right + (
+                        (0.5 * 0.75**2 + 0.75 * lead_speed) * np.sin(heading_diff)
                     ) >= MIN_OVERTAKE_WIDTH_M)
-            elif heading_diff < 0.0:
+            if heading_diff < 0.0:
                 has_future_width = (
-                    ctx.overtake_width_right - 1.1 - (
-                        0.35 * lead_speed * np.sin(heading_diff)
+                    ctx.overtake_width_right - (
+                        (0.5 * 0.75**2 + 0.75 * lead_speed) * np.sin(heading_diff)
                     ) >= MIN_OVERTAKE_WIDTH_M)
 
         if (
@@ -735,6 +745,8 @@ class FollowState(DrivingState):
             and is_slow_leader
             and is_ttc_close
             and has_future_width
+            and is_same_lane
+            and has_long_gap
         ):
             return "overtake"
         #--------------------------------- version 2 ---------------------------------
