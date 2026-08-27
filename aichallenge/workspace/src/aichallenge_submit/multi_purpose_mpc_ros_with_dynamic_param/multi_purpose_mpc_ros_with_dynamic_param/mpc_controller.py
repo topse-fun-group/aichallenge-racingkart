@@ -58,16 +58,13 @@ from multi_purpose_mpc_ros_msgs.msg import AckermannControlBoostCommand, PathCon
 from multi_purpose_mpc_ros_with_dynamic_param.tools.reference_velocity_configulator import ReferenceVelocityConfigulator
 
 # State machine
+import multi_purpose_mpc_ros_with_dynamic_param.states as states
 from multi_purpose_mpc_ros_with_dynamic_param.states import (
     StateContext,
     MPCStateParams,
     FollowState,
     OvertakeState,
     ControlMode,
-    FORWARD_CONE_DEG,
-    FORWARD_LATERAL_MAX,
-    FORWARD_VEHICLE_DETECTION,
-
 )
 from multi_purpose_mpc_ros_with_dynamic_param.state_manager import StateManager
 # from multi_purpose_mpc_ros_with_dynamic_param.lidar_processor import LidarProcessor
@@ -247,6 +244,34 @@ class MPCController(Node):
         return reference_path
 
     def _setup_parameters_callback(self) -> None:
+        STATE_PARAM_MAP = {
+            "stuck_velocity_threshold": ("STUCK_VELOCITY_THRESHOLD", float(states.STUCK_VELOCITY_THRESHOLD)),
+            "stuck_duration": ("STUCK_DURATION", float(states.STUCK_DURATION)),
+            "forward_cone_deg": ("FORWARD_CONE_DEG", float(states.FORWARD_CONE_DEG)),
+            "forward_lateral_max": ("FORWARD_LATERAL_MAX", float(states.FORWARD_LATERAL_MAX)),
+            "forward_vehicle_detection": ("FORWARD_VEHICLE_DETECTION", float(states.FORWARD_VEHICLE_DETECTION)),
+            "side_vehicle_angle_min_deg": ("SIDE_VEHICLE_ANGLE_MIN_DEG", float(states.SIDE_VEHICLE_ANGLE_MIN_DEG)),
+            "side_vehicle_angle_max_deg": ("SIDE_VEHICLE_ANGLE_MAX_DEG", float(states.SIDE_VEHICLE_ANGLE_MAX_DEG)),
+            "d0_m": ("D0_M", float(states.D0_M)),
+            "time_headway_sec": ("TIME_HEADWAY_SEC", float(states.TIME_HEADWAY_SEC)),
+            "forward_follow_distance_m": ("FORWARD_FOLLOW_DISTANCE_M", float(states.FORWARD_FOLLOW_DISTANCE_M)),
+            "follow_clear_hysteresis_sec": ("FOLLOW_CLEAR_HYSTERESIS_SEC", float(states.FOLLOW_CLEAR_HYSTERESIS_SEC)),
+            "follow_stop_distance_m": ("FOLLOW_STOP_DISTANCE_M", float(states.FOLLOW_STOP_DISTANCE_M)),
+            "follow_k_gap": ("FOLLOW_K_GAP", float(states.FOLLOW_K_GAP)),
+            "follow_k_v": ("FOLLOW_K_V", float(states.FOLLOW_K_V)),
+            "follow_min_speed_kmh": ("FOLLOW_MIN_SPEED_KMH", float(states.FOLLOW_MIN_SPEED_KMH)),
+            "follow_leader_moving_mps": ("FOLLOW_LEADER_MOVING_MPS", float(states.FOLLOW_LEADER_MOVING_MPS)),
+            "follow_target_distance_m": ("FOLLOW_TARGET_DISTANCE_M", float(states.FOLLOW_TARGET_DISTANCE_M)),
+            "min_overtake_width_m": ("MIN_OVERTAKE_WIDTH_M", float(states.MIN_OVERTAKE_WIDTH_M)),
+            "min_overtake_lead_speed": ("MIN_OVERTAKE_LEAD_SPEED", float(states.MIN_OVERTAKE_LEAD_SPEED)),
+            "overtake_closing_margin_m": ("OVERTAKE_CLOSING_MARGIN_M", float(states.OVERTAKE_CLOSING_MARGIN_M)),
+            "overtake_ttc_sec": ("OVERTAKE_TTC_SEC", float(states.OVERTAKE_TTC_SEC)),
+            "overtake_passed_clearance_m": ("OVERTAKE_PASSED_CLEARANCE_M", float(states.OVERTAKE_PASSED_CLEARANCE_M)),
+            "overtake_passed_clearance_time_sec": ("OVERTAKE_PASSED_CLEARANCE_TIME_SEC", float(states.OVERTAKE_PASSED_CLEARANCE_TIME_SEC)),
+            "vehicle_length": ("VEHICLE_LENGTH", float(states.VEHICLE_LENGTH)),
+            "vehicle_v_max": ("VEHICLE_V_MAX", float(states.VEHICLE_V_MAX)),
+        }
+
         def declatre_parameters():
             cfg_mpc = self._cfg.mpc
             self.declare_parameter("v_max", cfg_mpc.v_max)
@@ -265,6 +290,10 @@ class MPCController(Node):
             self.declare_parameter("accel_low_pass_gain", mpc_cfg.accel_low_pass_gain)
             self.declare_parameter("steer_low_pass_gain", mpc_cfg.steer_low_pass_gain)
             self.declare_parameter("wp_id_offset", mpc_cfg.wp_id_offset)
+
+            # states.py 定数の ROS パラメータ宣言
+            for param_name, (_, default_val) in STATE_PARAM_MAP.items():
+                self.declare_parameter(param_name, default_val)
 
         def param_cb(parameters):
             cfg_mpc = self._cfg.mpc # type: ignore
@@ -339,6 +368,11 @@ class MPCController(Node):
                     self._mpc.update_wp_id_offset(param.value)
                     self.get_logger().warn(f"wp_id_offset was updated to '{param.value}'")
 
+                elif param.name in STATE_PARAM_MAP:
+                    attr_name, _ = STATE_PARAM_MAP[param.name]
+                    val = float(param.value) if param.type_ in (Parameter.Type.DOUBLE, Parameter.Type.INTEGER) else param.value
+                    setattr(states, attr_name, val)
+                    self.get_logger().info(f"[StateParam] Dynamic update: states.{attr_name} = {val}")
 
             return SetParametersResult(successful=True)
 
@@ -1170,7 +1204,7 @@ class MPCController(Node):
         nearest_s_rel)."""
         # Forward criteria must match _scan_surrounding_vehicles exactly — see the
         # FORWARD_CONE_DEG comment in states.py for why.
-        HALF_ANGLE = np.deg2rad(FORWARD_CONE_DEG)
+        HALF_ANGLE = np.deg2rad(states.FORWARD_CONE_DEG)
 
         pose = odom_to_pose_2d(self._odom)  # type: ignore
         best_dist: Optional[float] = None
@@ -1210,7 +1244,7 @@ class MPCController(Node):
             v_speed = float(np.hypot(vx_vel, vy_vel))
 
             # 1. Side-by-side vehicle detection (-2.5m <= x_rel <= 2.5m, alongside on track)
-            if -2.5 <= x_rel <= 2.5 and 0.6 <= abs(y_rel) <= FORWARD_LATERAL_MAX:
+            if -2.5 <= x_rel <= 2.5 and 0.6 <= abs(y_rel) <= states.FORWARD_LATERAL_MAX:
                 has_side_vehicle = True
                 side_vehicle_speed = v_speed
                 side_vehicle_pos = (vx_pos, vy_pos)
@@ -1224,14 +1258,14 @@ class MPCController(Node):
             # StateContext. OvertakeState needs this to tell "the leader is now behind me"
             # from "the tracker lost it". No angle gate here: a vehicle directly behind
             # sits at ~180 deg.
-            if abs(s_rel) <= FORWARD_VEHICLE_DETECTION and abs(y_rel) <= FORWARD_LATERAL_MAX:
+            if abs(s_rel) <= states.FORWARD_VEHICLE_DETECTION and abs(y_rel) <= states.FORWARD_LATERAL_MAX:
                 if nearest_s_rel is None or abs(s_rel) < abs(nearest_s_rel):
                     nearest_s_rel = float(s_rel)
 
-            if s_rel <= 0.0 or s_rel > FORWARD_VEHICLE_DETECTION:
+            if s_rel <= 0.0 or s_rel > states.FORWARD_VEHICLE_DETECTION:
                 continue
 
-            if abs(y_rel) > FORWARD_LATERAL_MAX:
+            if abs(y_rel) > states.FORWARD_LATERAL_MAX:
                 continue
 
             angle = np.arctan2(dy, dx) - pose.theta
@@ -1374,7 +1408,7 @@ class MPCController(Node):
             if (fwd_angle_min_deg <= angle_deg <= fwd_angle_max_deg
                     and 0.0 < s_rel <= fwd_detect_distance
                     and x_rel > 0.0
-                    and abs(y_rel) <= FORWARD_LATERAL_MAX):
+                    and abs(y_rel) <= states.FORWARD_LATERAL_MAX):
                     # and abs(y_rel) <= 7.0):
                 left_w, right_w, _ = self._compute_v2x_overtake_corridor((vx_pos, vy_pos))
                 max_avail_w = max(left_w, right_w)
@@ -1455,9 +1489,9 @@ class MPCController(Node):
         ) = self._scan_surrounding_vehicles(
             pose,
             v,
-            fwd_detect_distance=FORWARD_VEHICLE_DETECTION,
-            fwd_angle_min_deg=-FORWARD_CONE_DEG,
-            fwd_angle_max_deg=FORWARD_CONE_DEG,
+            fwd_detect_distance=states.FORWARD_VEHICLE_DETECTION,
+            fwd_angle_min_deg=-states.FORWARD_CONE_DEG,
+            fwd_angle_max_deg=states.FORWARD_CONE_DEG,
         )
 
         if self._start_time is None:
