@@ -1669,8 +1669,7 @@ class MPCController(Node):
             # Follow state: dynamically adjust v_max to match leader speed
             if isinstance(current_state, FollowState):
                 if ctx.forward_vehicle_speed is not None:
-                    dynamic_v_max = current_state.get_adjusted_v_max_kmh(ctx)
-                    # v_max_mps = kmh_to_m_per_sec(dynamic_v_max)
+                    dynamic_v_max = current_state.get_adjusted_v_max_mps(ctx)
                     self._mpc.update_v_max(dynamic_v_max)
                     v_ref_list: List[float] = [dynamic_v_max] * len(self._reference_path.waypoints)
                     self._reference_path.set_v_ref(v_ref_list)

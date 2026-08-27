@@ -770,7 +770,7 @@ class FollowState(DrivingState):
 
         return None
 
-    def get_adjusted_v_max_kmh(self, ctx: StateContext) -> float:
+    def get_adjusted_v_max_mps(self, ctx: StateContext) -> float:
         """Compute dynamic v_max [km/h] with strict distance governor and side-vehicle yielding."""
         # If a side-vehicle is alongside and clearance is insufficient, yield by reducing speed
         max_side = max(ctx.overtake_width_left, ctx.overtake_width_right)
