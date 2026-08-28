@@ -54,7 +54,7 @@ SIDE_VEHICLE_ANGLE_MAX_DEG = 90.0  # [deg] 横最大検知角度
 # ---------------------------------------------------------------------------
 # follow state parameter
 # ---------------------------------------------------------------------------
-D0_M                        = 1.0   # [m] 追従時の停止目標車間距離 (default: 1.5)
+D0_M                        = 0.7   # [m] 追従時の停止目標車間距離 (default: 1.5)
 TIME_HEADWAY_SEC            = 0.35  # [s] 追従時に車間距離を縮める期待時間 (default: 0.35)
 FORWARD_FOLLOW_DISTANCE_M   = 5.0   # [m] 追従を行う前方車両との車間距離 (default: 4.0)
 FOLLOW_CLEAR_HYSTERESIS_SEC = 1.0   # [s] 追従状態を維持する最低時間 (チャタリング防止)
@@ -63,7 +63,7 @@ FOLLOW_K_GAP                = 1.4   # [1/s] ギャップ誤差 → 速度
 FOLLOW_K_V                  = 0.5   # [-] 相対速度ダンピング (default: 0.7)
 FOLLOW_MIN_SPEED_KMH        = 10.0  # [km/h] 最低追従速度
 FOLLOW_LEADER_MOVING_MPS    = 0.5   # [m/s] 0.5m/s = 1.8km/s
-FOLLOW_TARGET_DISTANCE_M    = 3.0
+FOLLOW_TARGET_DISTANCE_M    = 1.5
 
 # ---------------------------------------------------------------------------
 # overtake state parameter
@@ -77,6 +77,15 @@ OVERTAKE_PASSED_CLEARANCE_M = 1.7   # [m] 追い越し完了とみなす中心�
                                     # 全長(VEHICLE_LENGTH) + ラインへ戻り始める
                                     # オフセットが必要 (最低1.6より大きい値)
 OVERTAKE_PASSED_CLEARANCE_TIME_SEC = 0.35 # [s] 追い越し状態のクリア最大時間
+
+# ---------------------------------------------------------------------------
+# lateral shift (寄せ側) hysteresis parameter
+# ---------------------------------------------------------------------------
+# 左右の空き幅の差は先行車の横偏差の 2 倍で効く (diff = ub + lb - 2*e_y_leader)。
+# V2X の位置ノイズ σ≈0.1m は幅差 σ≈0.2m 相当なので、開始閾値は 2σ を取る。
+LATERAL_SHIFT_ENTER_DIFF_M = 0.4  # [m] 寄せを開始する左右空き幅の差
+LATERAL_SHIFT_EXIT_DIFF_M  = 0.2  # [m] センターラインへ戻す左右空き幅の差
+LATERAL_SHIFT_DWELL_SEC    = 0.2  # [s] 判定が継続すべき時間 (40Hz で 4 tick) default 0.1
 
 # ---------------------------------------------------------------------------
 # Vehicle configuration
@@ -136,6 +145,7 @@ class StateContext:
     overtake_width_left: float = 0.0      # [m] 車両の左の外端から道路端（壁マージン考慮）までの空き幅
     overtake_width_right: float = 0.0     # [m] 車両の右の外端から道路端（壁マージン考慮）までの空き幅
     target_overtake_offset: float = 0.0   # dynamic lateral offset [m] for centerline of free space
+    lateral_shift_side: str = "none"      # "left" | "right" | "none" — デッドバンド + dwell 適用後の寄せ側
     has_side_vehicle: bool = False        # True if another vehicle is alongside (-2.5m <= x_rel <= 2.5m)
     side_vehicle_speed: Optional[float] = None  # speed of side vehicle [m/s]
 
@@ -157,6 +167,68 @@ class StateContext:
     # boost使用時に以下をコメントアウト。
     # 現状は不安定もしくは効果が薄いのでコメントアウト
     publish_boost: Optional[Callable[[float], None]] = None
+
+
+# TODO: 調整中である。左右のステアリング切り返しのチャタリングが十分に抑えられてないため、
+# FollowStateはsimple pure pursuitを使用中である。しかし、以下の調整でチャタリングが
+# の抑制が確認でき次第、FollowStateにwaypoint shift pure pursuitを適用する
+class LateralShiftSideFilter:
+    """左右の空き幅差から「どちら側へ寄せるか」を決める。二段閾値 + ラッチ + dwell 付き。
+
+    幅差は先行車の横偏差の 2 倍で効く (diff = ub + lb - 2*e_y_leader) ため、
+    デッドバンド無しの単純比較では先行車がセンターライン付近にいるだけで
+    V2X の位置ノイズだけで毎 tick 符号が反転し、横目標が 3m 以上ジャンプして
+    ステアリングが左右に振れる。
+
+    判定
+    ----
+    - 差 >  LATERAL_SHIFT_ENTER_DIFF_M : 左へ寄せる候補
+    - 差 < -LATERAL_SHIFT_ENTER_DIFF_M : 右へ寄せる候補
+    - |差| < LATERAL_SHIFT_EXIT_DIFF_M : センターライン ("none") の候補
+    - その間の帯                       : 現状維持 (ラッチ)
+
+    候補が LATERAL_SHIFT_DWELL_SEC 継続して初めて確定する。1 tick でも
+    候補が変われば計時をやり直す (FollowState._clear_start_time と同じ型)。
+    """
+
+    def __init__(self) -> None:
+        self._side: str = "none"
+        self._pending: Optional[str] = None
+        self._pending_since: float = 0.0
+
+    @property
+    def side(self) -> str:
+        """現在確定している寄せ側。"""
+        return self._side
+
+    def update(self, left_width: float, right_width: float, now_sec: float) -> str:
+        diff = left_width - right_width
+
+        # 閾値はモジュールグローバルとして参照する。ROS パラメータは
+        # setattr(states, ...) でモジュール属性を差し替えるため、
+        # ローカルやデフォルト引数に取り込むと動的更新が効かなくなる。
+        if diff > LATERAL_SHIFT_ENTER_DIFF_M:
+            candidate = "left"
+        elif diff < -LATERAL_SHIFT_ENTER_DIFF_M:
+            candidate = "right"
+        elif abs(diff) < LATERAL_SHIFT_EXIT_DIFF_M:
+            candidate = "none"
+        else:
+            candidate = self._side  # 解除〜開始閾値の帯は現状維持
+
+        if candidate == self._side:
+            self._pending = None
+            return self._side
+
+        if candidate != self._pending:
+            self._pending = candidate
+            self._pending_since = now_sec
+        elif (now_sec - self._pending_since) >= LATERAL_SHIFT_DWELL_SEC:
+            self._side = candidate
+            self._pending = None
+
+        return self._side
+
 
 class DrivingState(ABC):
     """Base class for all driving states (State pattern)."""
@@ -602,7 +674,7 @@ class FollowState(DrivingState):
 
     @property
     def control_mode(self) -> ControlMode:
-        return ControlMode.WAYPOINT_SHIFT_PURE_PURSUIT
+        return ControlMode.PURE_PURSUIT
 
     def get_params(self) -> MPCStateParams:
         return MPCStateParams(

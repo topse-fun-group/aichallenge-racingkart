@@ -243,6 +243,9 @@ class MPCController(Node):
             "follow_min_speed_kmh": ("FOLLOW_MIN_SPEED_KMH", float(states.FOLLOW_MIN_SPEED_KMH)),
             "follow_leader_moving_mps": ("FOLLOW_LEADER_MOVING_MPS", float(states.FOLLOW_LEADER_MOVING_MPS)),
             "follow_target_distance_m": ("FOLLOW_TARGET_DISTANCE_M", float(states.FOLLOW_TARGET_DISTANCE_M)),
+            "lateral_shift_enter_diff_m": ("LATERAL_SHIFT_ENTER_DIFF_M", float(states.LATERAL_SHIFT_ENTER_DIFF_M)),
+            "lateral_shift_exit_diff_m": ("LATERAL_SHIFT_EXIT_DIFF_M", float(states.LATERAL_SHIFT_EXIT_DIFF_M)),
+            "lateral_shift_dwell_sec": ("LATERAL_SHIFT_DWELL_SEC", float(states.LATERAL_SHIFT_DWELL_SEC)),
             "min_overtake_width_m": ("MIN_OVERTAKE_WIDTH_M", float(states.MIN_OVERTAKE_WIDTH_M)),
             "min_overtake_lead_speed": ("MIN_OVERTAKE_LEAD_SPEED", float(states.MIN_OVERTAKE_LEAD_SPEED)),
             "overtake_closing_margin_m": ("OVERTAKE_CLOSING_MARGIN_M", float(states.OVERTAKE_CLOSING_MARGIN_M)),
@@ -398,6 +401,9 @@ class MPCController(Node):
         self._stopped_since = None  # time when velocity first dropped near zero
         self._start_time = None
         self._last_recovery_exit_time = None
+
+        # --- Lateral shift side (寄せ側) hysteresis ---
+        self._shift_side_filter = states.LateralShiftSideFilter()
 
         # stats
         self._stats = ExecutionStats(self.get_logger(), window_size=50, record_count_threshold=1000)
@@ -670,7 +676,7 @@ class MPCController(Node):
             return default_speed, 0.0
 
     def _compute_waypoint_shift_pure_pursuit_control(
-        self, pose, v_current: float, ctx: StateContext
+        self, pose, v_current: float, ctx: StateContext, shift_side: Optional[str] = None
     ) -> Tuple[float, float]:
         """Compute (target_speed_mps, steer_cmd) using Pure Pursuit on shifted waypoints for overtaking."""
         target_speed_mps = kmh_to_m_per_sec(35.0)
@@ -698,14 +704,24 @@ class MPCController(Node):
             # 先行車両の横端からの追い越しラインとする。実際の座標はセンターラインから
             # 先行車両の車幅の半分の最大0.725m未満+先行車両との横マージン0.225mだけ
             # ずらした位置が実際の追い越し時の座標になる
-            target_offset = ctx.target_overtake_offset
-            if abs(target_offset) > 0.1:
-                is_left = (ctx.overtake_width_left >= ctx.overtake_width_right)
-                # target_offset = 1.6 if is_left else -1.6
-                target_offset = (
-                    ((ctx.overtake_width_left - 0.5) / 2.0) + 0.725 + 0.225
-                    if is_left else -(((ctx.overtake_width_right - 0.5) / 2.0) + 0.725 + 0.225)
-                )
+            # 寄せ側の決定。shift_side が渡されたとき (FollowState) はデッドバンド +
+            # dwell 済みのラッチ判定を使い、"none" ならセンターラインを走る。
+            # 渡されないとき (OvertakeState) は従来どおり毎 tick の幅比較で決める。
+            if shift_side is not None:
+                side = shift_side
+            elif abs(ctx.target_overtake_offset) <= 0.1:
+                # 前方にも側方にも車がいない (_compute_v2x_overtake_corridor が 0 を返す)。
+                # このガードを落とすと幅 0 のとき 0.7m のオフセットが出てしまう。
+                side = "none"
+            else:
+                side = "left" if ctx.overtake_width_left >= ctx.overtake_width_right else "right"
+
+            if side == "none":
+                target_offset = 0.0
+            elif side == "left":
+                target_offset = ((ctx.overtake_width_left - 0.5) / 2.0) + 0.725 + 0.17
+            else:
+                target_offset = -(((ctx.overtake_width_right - 0.5) / 2.0) + 0.725 + 0.17)
 
             # S字カーブ生成のための Hann 窓シフト処理
             # N_SHIFT = 35 # 35pointでだいたい35m
@@ -1173,6 +1189,7 @@ class MPCController(Node):
             overtake_width_left=left_w,
             overtake_width_right=right_w,
             target_overtake_offset=target_offset,
+            lateral_shift_side=self._shift_side_filter.update(left_w, right_w, now_sec),
             has_side_vehicle=has_side,
             side_vehicle_speed=side_speed,
             has_forward_vehicle=has_fwd,
@@ -1296,9 +1313,21 @@ class MPCController(Node):
 
             # ---- Control Selection (Waypoint-Shift Pure Pursuit for Follow/Overtake, Pure Pursuit otherwise) ----
             if current_state.control_mode == ControlMode.WAYPOINT_SHIFT_PURE_PURSUIT:
-                v_target, steer_target = self._compute_waypoint_shift_pure_pursuit_control(pose, v, ctx)
+                # FollowState だけデッドバンド + dwell 付きの寄せ側を渡す。
+                # Overtake は幅の差が大きい場面に限られるため従来どおり毎 tick 判定。
+                shift_side = ctx.lateral_shift_side if isinstance(current_state, FollowState) else None
+                v_target, steer_target = self._compute_waypoint_shift_pure_pursuit_control(
+                    pose, v, ctx, shift_side)
             else:
                 v_target, steer_target = self._compute_pure_pursuit_control(pose, v)
+
+            # FollowState: 車間 PD の出力を縦方向指令に反映する。
+            # _compute_waypoint_shift_pure_pursuit_control は wp.v_ref を読まず
+            # 35 km/h 固定を返すため、ここで上書きしないと車間制御が効かない。
+            # ステア (lookahead は 35 km/h ベース) は既存チューニングを崩さないよう触らない。
+            if follow_target_speed_mps is not None:
+                v_target = follow_target_speed_mps
+
             u = [v_target, steer_target]
             max_delta = steer_target
 
