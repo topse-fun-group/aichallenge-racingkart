@@ -246,6 +246,11 @@ class MPCController(Node):
             "lateral_shift_enter_diff_m": ("LATERAL_SHIFT_ENTER_DIFF_M", float(states.LATERAL_SHIFT_ENTER_DIFF_M)),
             "lateral_shift_exit_diff_m": ("LATERAL_SHIFT_EXIT_DIFF_M", float(states.LATERAL_SHIFT_EXIT_DIFF_M)),
             "lateral_shift_dwell_sec": ("LATERAL_SHIFT_DWELL_SEC", float(states.LATERAL_SHIFT_DWELL_SEC)),
+            "recovery_aligned_heading_deg": ("RECOVERY_ALIGNED_HEADING_DEG", float(states.RECOVERY_ALIGNED_HEADING_DEG)),
+            "recovery_aligned_e_y_m": ("RECOVERY_ALIGNED_E_Y_M", float(states.RECOVERY_ALIGNED_E_Y_M)),
+            "recovery_steer_k": ("RECOVERY_STEER_K", float(states.RECOVERY_STEER_K)),
+            "recovery_boost_value": ("RECOVERY_BOOST_VALUE", float(states.RECOVERY_BOOST_VALUE)),
+            "recovery_boost_duration_sec": ("RECOVERY_BOOST_DURATION_SEC", float(states.RECOVERY_BOOST_DURATION_SEC)),
             "min_overtake_width_m": ("MIN_OVERTAKE_WIDTH_M", float(states.MIN_OVERTAKE_WIDTH_M)),
             "min_overtake_lead_speed": ("MIN_OVERTAKE_LEAD_SPEED", float(states.MIN_OVERTAKE_LEAD_SPEED)),
             "overtake_closing_margin_m": ("OVERTAKE_CLOSING_MARGIN_M", float(states.OVERTAKE_CLOSING_MARGIN_M)),
@@ -404,6 +409,9 @@ class MPCController(Node):
 
         # --- Lateral shift side (寄せ側) hysteresis ---
         self._shift_side_filter = states.LateralShiftSideFilter()
+
+        # --- Recovery boost ---
+        self._recovery_boost_off_time: Optional[float] = None  # boost を切る時刻 [s]
 
         # stats
         self._stats = ExecutionStats(self.get_logger(), window_size=50, record_count_threshold=1000)
@@ -1223,11 +1231,6 @@ class MPCController(Node):
             return
 
         try:
-            now = self.get_clock().now()
-            t = (now - self._t_start).nanoseconds / 1e9
-            dt = (now - self._last_t).nanoseconds / 1e9
-
-            self._last_t = now
             self._loop += 1
 
             # record and print execution stats
@@ -1236,6 +1239,14 @@ class MPCController(Node):
 
             # self.get_logger().info("loop")
             self._control_rate.sleep()
+
+            # 時刻は sleep の後に取る。先に取ると now が 1 制御周期 (25ms) 古くなり、
+            # 衝突ラッチの判定と publish するコマンドのヘッダスタンプがその分ずれる。
+            # dt は前後どちらで測っても 1 周期のままで変わらない。
+            now = self.get_clock().now()
+            t = (now - self._t_start).nanoseconds / 1e9
+            dt = (now - self._last_t).nanoseconds / 1e9
+            self._last_t = now
 
             if self._loop % 100 == 0:
                 # update reference path
@@ -1265,10 +1276,26 @@ class MPCController(Node):
 
             if prev_state_name == "recovery" and self._state_manager.current_state_name != "recovery":
                 self._last_recovery_exit_time = (now.nanoseconds / 1e9)
+                # 衝突ラッチ (2.5s) が残っていると follow_path / follow / overtake が
+                # 即座に "recovery" を返し、MIN_DWELL_TIME の recovery 例外により
+                # 無条件で再突入してループする。復帰後に本当に再衝突すれば
+                # condition トピックが再びラッチを立てるので検知能力は落ちない。
+                self._last_colliding_time = None
                 # Instantly reset last control memory to forward motion for zero-lag launch
                 self._last_u[0] = 1.5
                 self._last_acc = 1.0
-                self.get_logger().info("Exited RecoveryState: instant launch & recovery cooldown started")
+                # boost の ON は RecoveryState.on_exit が publish 済み。ここでは切る時刻だけ持つ。
+                self._recovery_boost_off_time = (
+                    ctx.current_time_sec + states.RECOVERY_BOOST_DURATION_SEC)
+                self.get_logger().info("Exited RecoveryState: instant launch & boost on")
+
+            # 復帰 boost を時間で切る。OvertakeState が boost を使っている間は
+            # その on_exit が 0.0 を出すので、ここで上書きしない。
+            if (self._recovery_boost_off_time is not None
+                    and ctx.current_time_sec >= self._recovery_boost_off_time):
+                if not isinstance(current_state, states.OvertakeState):
+                    self._publish_boost(0.0)
+                self._recovery_boost_off_time = None
 
             # 横オフセットによる車両状態のシフトは MPC の参照点をずらすためのものだった。
             # Waypoint-shift Pure Pursuit は ctx.target_overtake_offset から独自に

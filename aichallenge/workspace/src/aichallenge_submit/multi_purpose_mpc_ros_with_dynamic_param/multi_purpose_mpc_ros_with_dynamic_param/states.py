@@ -36,7 +36,7 @@ except ImportError:
 # Stuck detection constants (shared by all states)
 # ---------------------------------------------------------------------------
 STUCK_VELOCITY_THRESHOLD = 0.3  # [m/s] — below this is considered "stopped"
-STUCK_DURATION = 3.0            # [s] — stopped 8s triggers recovery (prevents startup false-alarm)
+STUCK_DURATION = 0.7            # [s] — stopped 8s triggers recovery (prevents startup false-alarm)
 
 # ---------------------------------------------------------------------------
 # Forward-vehicle detection (shared by every state and by both detectors)
@@ -77,6 +77,16 @@ OVERTAKE_PASSED_CLEARANCE_M = 1.7   # [m] 追い越し完了とみなす中心�
                                     # 全長(VEHICLE_LENGTH) + ラインへ戻り始める
                                     # オフセットが必要 (最低1.6より大きい値)
 OVERTAKE_PASSED_CLEARANCE_TIME_SEC = 0.35 # [s] 追い越し状態のクリア最大時間
+
+# ---------------------------------------------------------------------------
+# recovery state parameter
+# ---------------------------------------------------------------------------
+RECOVERY_ALIGNED_HEADING_DEG = 5.0  # [deg] 復帰完了とみなす経路との角度差
+RECOVERY_ALIGNED_E_Y_M       = 0.5   # [m]   復帰完了とみなすセンターラインからの距離
+RECOVERY_STEER_K             = 1.5   # [-]   経路との角度差 → 舵角のゲイン
+                                     #       1.0 = ずれた角度分そのまま切る
+RECOVERY_BOOST_VALUE         = 1.5   # [-]   復帰後の boost 値 (OvertakeState と同値)
+RECOVERY_BOOST_DURATION_SEC  = 2.0   # [s]   復帰後に boost を維持する時間
 
 # ---------------------------------------------------------------------------
 # lateral shift (寄せ側) hysteresis parameter
@@ -546,36 +556,59 @@ class FollowPathState(DrivingState):
 
 
 class RecoveryState(DrivingState):
-    """3-Phase Recovery: wait (0.5s) -> directional back (3.0s) -> directional forward turn (2.0s) -> follow_path.
+    """2-Phase Recovery: directional back -> directional forward turn -> follow_path.
 
     Sequence
     --------
-    1. **wait** (``WAIT_DURATION`` = 0.5s): full stop, records collision side (left ey>=0 or right ey<0).
-    2. **back** (``BACK_DURATION`` = 3.0s): reverse (gear=REVERSE) with directional steering:
-       - Left collision (left on track): steer LEFT (+0.55 rad) while reversing.
-       - Right collision (right on track): steer RIGHT (-0.55 rad) while reversing.
-    3. **forward_turn** (``FORWARD_TURN_DURATION`` = 2.0s): forward drive (gear=DRIVE) with directional steering:
-       - Left collision (left on track): steer RIGHT (-0.55 rad) to point nose towards track right.
-       - Right collision (right on track): steer LEFT (+0.55 rad) to point nose towards track left.
-    4. Transition to ``follow_path``.
+    1. **back** (``BACK_DURATION_TIME_SEC``): reverse (gear=REVERSE).
+    2. **forward_turn** (``FORWARD_DURATION_TIME_SEC``): forward drive (gear=DRIVE).
+    3. Transition to ``follow_path``.
+
+    操舵
+    ----
+    どちらのフェーズも**経路からずれた角度分だけ舵を切る**
+    (``delta = ±RECOVERY_STEER_K * e_psi``、``±RECOVERY_STEER_LOCK_RAD`` でクリップ)。
+    自転車モデルの ``psi_dot = (v/L) * tan(delta)`` より e_psi を減らす舵角の符号は
+    進行方向で反転するので、後退では ``+``、前進では ``-`` を取る。
+    後退中は角度を消す過程で ``e_y`` も自然に減る (``y_dot ~ v * sin(e_psi)``)。
+    経路と平行に刺さった (``e_psi ~ 0``) ときは舵角も 0 になり、まっすぐ後退する。
+
+    ``on_enter`` が直接 ``back`` に入るため、**衝突を検知した tick から後退指令と
+    ギア REVERSE が出る**。停止待機フェーズを挟むと、StateManager が遷移した tick では
+    新しい状態の ``check_transition`` を呼ばない都合で (0,0,0) + GEAR_DRIVE が
+    1 tick 漏れて後退の立ち上がりが遅れる。
+
+    早期離脱
+    --------
+    ``back`` / ``forward_turn`` はいずれも「経路と平行 (角度差 < ``RECOVERY_ALIGNED_HEADING_DEG``)
+    かつセンターライン近傍 (|e_y| < ``RECOVERY_ALIGNED_E_Y_M``)」が成立した時点で
+    次へ進む。姿勢がほとんど崩れていない軽い接触なら数 tick で ``follow_path`` に戻る。
+    各フェーズの時間はフェーズ開始からで測るので、``back`` を早く抜けても
+    ``forward_turn`` の持ち時間は変わらない。
+
+    退出時に ``ctx.publish_boost`` で boost を入れる。OFF は mpc_controller 側の
+    デッドラインが出す (follow_path 以外へ直行しても確実に切るため)。
     """
 
-    WAIT_DURATION_TIME_SEC = 0.5     # [s] 停止待機時間
-    BACK_DURATION_TIME_SEC = 1.0     # [s] 最大後退時間
-    FORWARD_DURATION_TIME_SEC = 1.0  # [s] 最大前進時間
+    BACK_DURATION_TIME_SEC = 1.6     # [s] 最大後退時間
+    FORWARD_DURATION_TIME_SEC = 3.0  # [s] 最大前進時間
 
-    RECOVERY_FORWARD_TURN_SPEED_MPS = 7.0   # [m/s] 前進旋回速度
-    RECOVERY_BACK_TURN_SPEED_MPS    = -7.0  # [m/s] 後退旋回速度
+    # 速度・加速度はいずれも「車両側の上限まで出し切る」ことを狙った値。
+    # override 経路には np.clip(acc, a_min, a_max) が掛からない (mpc_controller が
+    # override ブロックで早期 return するため) ので、ここの値がそのまま
+    # longitudinal.speed / .acceleration に載る。実効上限は AWSIM の車両モデル次第。
+    RECOVERY_FORWARD_TURN_SPEED_MPS = 32.0   # [m/s] 前進旋回速度
+    RECOVERY_BACK_TURN_SPEED_MPS    = -32.0  # [m/s] 後退旋回速度
 
-    RECOVERY_FORWARD_ACCEL_MPSS = 6.0  # [m/s^2] 前進旋回加速度
-    RECOVERY_BACK_ACCEL_MPSS = 6.0     # [m/s^2] 後退旋回加速度
+    RECOVERY_FORWARD_ACCEL_MPSS = 3.0  # [m/s^2] USE_BUG_ACC と同値
+    RECOVERY_BACK_ACCEL_MPSS = 3.0     # [m/s^2] (override 側で abs() を取る)
 
-    RECOVERY_STEER_LOCK_RAD = 0.55     # [rad] 大舵角ステアリング角度
+    RECOVERY_STEER_LOCK_RAD = 1.48     # [rad] 大舵角ステアリング角度
 
     def __init__(self) -> None:
-        self._phase: str = "wait"
-        self._enter_time: Optional[float] = None  # "wait" | "back" | "forward_turn"
-        self._collision_side: str = "left"        # "left" | "right"
+        self._phase: str = "back"                     # "back" | "forward_turn"
+        self._enter_time: Optional[float] = None
+        self._phase_start_time: float = 0.0           # 現フェーズの開始時刻 [s]
 
     @property
     def name(self) -> str:
@@ -603,28 +636,49 @@ class RecoveryState(DrivingState):
 
     def on_enter(self, ctx: StateContext) -> None:
         self._enter_time = ctx.current_time_sec
-        self._phase = "wait"
-        # 衝突時の軌道横偏差左側: 左側(ey >= 0)か右側(ey < 0)かを記録
-        self._collision_side = "left" if ctx.path_e_y >= 0 else "right"
+        # 衝突を検知した tick から後退を始める。停止待機フェーズを挟むと
+        # (0,0,0) + GEAR_DRIVE が 1 tick 漏れる (クラス docstring 参照)。
+        self._enter_phase("back", ctx)
 
     def on_exit(self, ctx: StateContext) -> None:
         self._enter_time = None
-        self._phase = "wait"
+        self._phase = "back"
+
+        # 復帰直後の立ち上がりを稼ぐため boost を入れる。
+        # OFF は mpc_controller 側のデッドラインが出す。follow_path 以外へ
+        # 直行した場合でも確実に切るため、状態側では時間を持たない。
+        if ctx.publish_boost is not None:
+            ctx.publish_boost(RECOVERY_BOOST_VALUE)
+
+    def _enter_phase(self, phase: str, ctx: StateContext) -> None:
+        self._phase = phase
+        self._phase_start_time = ctx.current_time_sec
+
+    def _heading_error(self, ctx: StateContext) -> float:
+        """経路方位に対する自車 heading のずれ [rad]。左が正、[-pi, pi) に正規化。"""
+        return (ctx.pose_theta - ctx.path_psi + np.pi) % (2 * np.pi) - np.pi
+
+    def _is_aligned(self, ctx: StateContext) -> bool:
+        """経路と平行かつセンターライン近傍か（＝もう復帰動作は要らないか）。"""
+        # ctx.path_deviation は _build_state_context で代入されておらず常に 0.0 なので
+        # 使わない。横偏差は path_e_y、角度差は pose_theta と path_psi から出す。
+        return (
+            abs(self._heading_error(ctx)) < np.deg2rad(RECOVERY_ALIGNED_HEADING_DEG)
+            and abs(ctx.path_e_y) < RECOVERY_ALIGNED_E_Y_M
+        )
 
     def check_transition(self, ctx: StateContext) -> Optional[str]:
         if self._enter_time is None:
             return None
 
-        elapsed = ctx.current_time_sec - self._enter_time
-
-        if self._phase == "wait":
-            if elapsed >= self.WAIT_DURATION_TIME_SEC:
-                self._phase = "back"
-            return None  # stay in recovery while waiting
+        # フェーズごとの経過時間。早期離脱で back を短く切り上げても
+        # forward_turn の持ち時間が変わらないよう、累積ではなくフェーズ基準で測る。
+        phase_elapsed = ctx.current_time_sec - self._phase_start_time
 
         if self._phase == "back":
-            if elapsed >= (self.WAIT_DURATION_TIME_SEC + self.BACK_DURATION_TIME_SEC):
-                self._phase = "forward_turn"
+            # 向きが整ったら後退を打ち切って前進へ
+            if self._is_aligned(ctx) or phase_elapsed >= self.BACK_DURATION_TIME_SEC:
+                self._enter_phase("forward_turn", ctx)
             return None
 
 
@@ -632,10 +686,8 @@ class RecoveryState(DrivingState):
         # recovery -> follow path
         ###################################################
 
-        total_recovery_duration = (
-            self.WAIT_DURATION_TIME_SEC + self.BACK_DURATION_TIME_SEC + self.FORWARD_DURATION_TIME_SEC
-        )
-        if elapsed >= total_recovery_duration:
+        # forward_turn: 向きが整ったら即座に通常走行へ戻る
+        if self._is_aligned(ctx) or phase_elapsed >= self.FORWARD_DURATION_TIME_SEC:
             return "follow_path"
 
         return None
@@ -643,19 +695,20 @@ class RecoveryState(DrivingState):
     def compute_control_override(
         self, ctx: StateContext
     ) -> Optional[Tuple[float, float, float]]:
-        if self._phase == "wait":
-            return (0.0, 0.0, 0.0)  # full stop
+        # 経路からずれた角度分だけ舵を切る。自転車モデルの psi_dot = (v/L)*tan(delta)
+        # より、e_psi を減らす舵角の符号は進行方向で反転する。
+        #   後退 (v < 0): delta と同符号   -> +K * e_psi
+        #   前進 (v > 0): delta と逆符号   -> -K * e_psi
+        # 経路と平行に刺さった (e_psi ~ 0) ときは舵角も 0 になり、まっすぐ後退する。
+        e_psi = self._heading_error(ctx)
+        lock = self.RECOVERY_STEER_LOCK_RAD
 
         if self._phase == "back":
-            # 1. 軌道の左側にいるとき: ステアリングを左に切ってバック (+0.55 rad)
-            # 2. 軌道の右側にいるとき: ステアリングを右に切ってバック (-0.55 rad)
-            steer_cmd = self.RECOVERY_STEER_LOCK_RAD if self._collision_side == "left" else -self.RECOVERY_STEER_LOCK_RAD
+            steer_cmd = float(np.clip(RECOVERY_STEER_K * e_psi, -lock, lock))
             return (self.RECOVERY_BACK_TURN_SPEED_MPS, steer_cmd, self.RECOVERY_BACK_ACCEL_MPSS)
 
         # phase == "forward_turn" (前進旋回)
-        # 1. 軌道の左側にいたとき: 姿勢が右側に向いて前進 (-0.55 rad)
-        # 2. 軌道の右側にいたとき: 姿勢が左側に向いて前進 (+0.55 rad)
-        steer_cmd = -self.RECOVERY_STEER_LOCK_RAD if self._collision_side == "left" else self.RECOVERY_STEER_LOCK_RAD
+        steer_cmd = float(np.clip(-RECOVERY_STEER_K * e_psi, -lock, lock))
         return (self.RECOVERY_FORWARD_TURN_SPEED_MPS, steer_cmd, self.RECOVERY_FORWARD_ACCEL_MPSS)
 
 
