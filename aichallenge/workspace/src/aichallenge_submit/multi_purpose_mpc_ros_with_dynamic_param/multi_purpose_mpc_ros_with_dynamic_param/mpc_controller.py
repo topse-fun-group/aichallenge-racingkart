@@ -741,8 +741,8 @@ class MPCController(Node):
                 idx = (closest_idx + i) % n_wps
                 wp = wps[idx]
                 psi = float(wp.psi)
-                ub = float(wp.ub) if wp.ub is not None else 3.5  # 左端
-                lb = float(wp.lb) if wp.lb is not None else -3.5 # 右端
+                ub = float(wp.ub) if wp.ub is not None else 3.25  # 左端
+                lb = float(wp.lb) if wp.lb is not None else -3.25 # 右端
 
                 # 壁マージン0.5m＋自車半幅0.725m（計1.225m）を確保する安全クランプ
                 d_offset = float(np.clip(target_offset, lb + 1.225, ub - 1.225))
@@ -1276,10 +1276,11 @@ class MPCController(Node):
             self._car.update_states(pose.x, pose.y, pose.theta)
 
             # Follow state: dynamically adjust v_max to match leader speed
+            follow_target_speed_mps: Optional[float] = None
             if isinstance(current_state, FollowState):
                 if ctx.forward_vehicle_speed is not None:
-                    dynamic_v_max = current_state.get_adjusted_v_max_mps(ctx)
-                    v_ref_list: List[float] = [dynamic_v_max] * len(self._reference_path.waypoints)
+                    follow_target_speed_mps = current_state.get_adjusted_v_max_mps(ctx)
+                    v_ref_list: List[float] = [follow_target_speed_mps] * len(self._reference_path.waypoints)
                     self._reference_path.set_v_ref(v_ref_list)
 
             # Check for control override (e.g., Recovery wait/back)

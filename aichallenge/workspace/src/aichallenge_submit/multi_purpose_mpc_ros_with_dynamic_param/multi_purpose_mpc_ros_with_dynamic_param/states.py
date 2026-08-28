@@ -68,7 +68,7 @@ FOLLOW_TARGET_DISTANCE_M    = 1.5
 # ---------------------------------------------------------------------------
 # overtake state parameter
 # ---------------------------------------------------------------------------
-MIN_OVERTAKE_WIDTH_M      = 3.2     # [m] 最低追い越し幅 (default 2.5)
+MIN_OVERTAKE_WIDTH_M      = 2.8     # [m] 最低追い越し幅 (default 2.5)
 MIN_OVERTAKE_LEAD_SPEED   = 25.0    # [km/s] 前方車両の最低追い越し速度
 OVERTAKE_CLOSING_MARGIN_M = 1.0     # [m] 追い越し時の車間距離の余裕距離
 OVERTAKE_TTC_SEC          = 0.3     # [s] TTCの時間
@@ -346,7 +346,7 @@ class FollowPathState(DrivingState):
             and ctx.forward_vehicle_speed <= 25.0 / 3.6
             and ctx.velocity >= 29.0 / 3.6
         ):
-            #-------------- version 1 --------------
+            #---------------------------------------
             # 比較的に安定した条件も一時的にメモで残す
             #---------------------------------------
             # if (
@@ -356,16 +356,14 @@ class FollowPathState(DrivingState):
             #     ) <= 2 # 1.5
             # ):
             #     return "overtake"
-            #-------------- version 1 --------------
+            #---------------------------------------
 
-
-            #--------------------------------- version 2 ---------------------------------
             is_left = ctx.overtake_width_left > ctx.overtake_width_right
             is_same_lane = (ctx.path_e_y > 0 and is_left) or (ctx.path_e_y < 0 and not is_left)
             lead_speed = ctx.forward_vehicle_speed if ctx.forward_vehicle_speed is not None else 0.0
             is_overtake_gap = (
                 (ctx.forward_vehicle_gap + VEHICLE_LENGTH * 1.5 + OVERTAKE_CLOSING_MARGIN_M)
-                <= 0.4 * (ctx.velocity - lead_speed)
+                <= 0.4 * (ctx.velocity - lead_speed) + 0.5 * 2.5 * 0.4**2
             )
             heading_diff = (
                 ctx.forward_vehicle_heading_diff
@@ -397,14 +395,18 @@ class FollowPathState(DrivingState):
                         ) >= MIN_OVERTAKE_WIDTH_M)
 
             if (
+                lead_speed < 1.0 / 3.6
+                and ctx.min_forward_overtake_width >= MIN_OVERTAKE_WIDTH_M
+            ):
+                return "overtake"
+
+            if (
                 is_overtake_gap
                 and ctx.min_forward_overtake_width >= MIN_OVERTAKE_WIDTH_M
                 and has_future_width
                 and is_same_lane
             ):
                 return "overtake"
-            #--------------------------------- version 2 ---------------------------------
-
 
         # Check Overtake condition
         #-------------------------- version 1 --------------------------
@@ -452,9 +454,6 @@ class FollowPathState(DrivingState):
         #         return "follow"
         #-------------------------- version 1 --------------------------
 
-
-        #-------------------------- version 2 --------------------------
-
         ###################################################
         #               /--> follow
         # follow path --
@@ -482,16 +481,16 @@ class FollowPathState(DrivingState):
                 speed_diff = ctx.velocity - lead_speed
 
                 # (先行車両との車間距離 + 車体全長 + 車体半分長 + オフセット距離)[m]
-                # の距離を 1.5s で移動できるだけの速度差があるかどうか
+                # の距離を 0.4s で移動できるだけの速度差があるかどうか
                 is_closing = speed_diff >= (
                     (
                         ctx.forward_vehicle_gap + VEHICLE_LENGTH + OVERTAKE_CLOSING_MARGIN_M
-                    ) / 0.75)
+                    ) / 0.4)
 
                 # 車間距離が(停止車間距離 + 瞬間詰め距離 + オフセット距離)以下であるかどうか
                 is_settled_behind = (
                     ctx.forward_vehicle_gap
-                    <= D0_M + TIME_HEADWAY_SEC * ctx.velocity + OVERTAKE_CLOSING_MARGIN_M)
+                    <= D0_M + TIME_HEADWAY_SEC * ctx.velocity + 0.5 * 2.5 * TIME_HEADWAY_SEC**2 + OVERTAKE_CLOSING_MARGIN_M)
 
                 is_ttc_close = is_closing or is_settled_behind
 
@@ -522,8 +521,14 @@ class FollowPathState(DrivingState):
                     if heading_diff < 0.0:
                         has_future_width = (
                             ctx.overtake_width_right - (
-                                (0.5 *0.4**2 + 0.4 * lead_speed) * np.sin(heading_diff)
+                                (0.5 * 0.4**2 + 0.4 * lead_speed) * np.sin(heading_diff)
                             ) >= MIN_OVERTAKE_WIDTH_M)
+
+                if (
+                    lead_speed < 1.0 / 3.6
+                    and ctx.min_forward_overtake_width >= MIN_OVERTAKE_WIDTH_M
+                ):
+                    return "overtake"
 
                 if (
                     not ctx.has_left_side_vehicle
@@ -536,8 +541,7 @@ class FollowPathState(DrivingState):
                 ):
                     return "overtake"
                 return "follow"
-        #-------------------------- version 2 --------------------------
-
+        #-------------------------- version 3 --------------------------
         return None
 
 
@@ -747,10 +751,9 @@ class FollowState(DrivingState):
         #     return "overtake"
         #--------------------------------- version 1 ---------------------------------
 
-        #--------------------------------- version 2 ---------------------------------
         is_left = ctx.overtake_width_left > ctx.overtake_width_right
         is_same_lane = (ctx.path_e_y > 0 and is_left) or (ctx.path_e_y < 0 and not is_left)
-        has_long_gap = ctx.forward_vehicle_distance > 3.5 if ctx.forward_vehicle_distance is not None else False
+        # has_long_gap = ctx.forward_vehicle_distance > 3.5 if ctx.forward_vehicle_distance is not None else False
 
         # 先行車両の速度
         lead_speed = ctx.closest_forward_vehicle_speed if ctx.closest_forward_vehicle_speed is not None else 0.0
@@ -770,13 +773,13 @@ class FollowState(DrivingState):
         is_closing = speed_diff >= (
             (
                 ctx.forward_vehicle_gap + VEHICLE_LENGTH + OVERTAKE_CLOSING_MARGIN_M
-            ) / 0.5
+            ) / 0.4
         )
 
         # 車間距離が(停止車間距離 + 瞬間詰め距離 + オフセット距離)以下であるかどうか
         is_settled_behind = (
             ctx.forward_vehicle_gap
-            <= D0_M + TIME_HEADWAY_SEC * ctx.velocity + OVERTAKE_CLOSING_MARGIN_M)
+            <= D0_M + TIME_HEADWAY_SEC * ctx.velocity + 0.4 * 2.5 * TIME_HEADWAY_SEC**2 + OVERTAKE_CLOSING_MARGIN_M)
 
         is_ttc_close = is_closing or is_settled_behind
 
@@ -791,24 +794,30 @@ class FollowState(DrivingState):
             if heading_diff > 0.0:
                 has_future_width = (
                     ctx.overtake_width_left - (
-                        (0.5 * 0.75**2 + 0.75 * lead_speed) * np.sin(heading_diff)
+                        (0.5 * 0.4**2 + 0.4 * lead_speed) * np.sin(heading_diff)
                     ) >= MIN_OVERTAKE_WIDTH_M)
             elif heading_diff < 0.0:
                 has_future_width = (
                     ctx.overtake_width_left + (
-                        (0.5 * 0.75**2 + 0.75 * lead_speed) * np.sin(heading_diff)
+                        (0.5 * 0.4**2 + 0.4 * lead_speed) * np.sin(heading_diff)
                     ) >= MIN_OVERTAKE_WIDTH_M)
         elif ctx.overtake_width_left < ctx.overtake_width_right:
             if heading_diff > 0.0:
                 has_future_width = (
                     ctx.overtake_width_right + (
-                        (0.5 * 0.75**2 + 0.75 * lead_speed) * np.sin(heading_diff)
+                        (0.5 * 0.4**2 + 0.4 * lead_speed) * np.sin(heading_diff)
                     ) >= MIN_OVERTAKE_WIDTH_M)
             if heading_diff < 0.0:
                 has_future_width = (
                     ctx.overtake_width_right - (
-                        (0.5 * 0.75**2 + 0.75 * lead_speed) * np.sin(heading_diff)
+                        (0.5 * 0.4**2 + 0.4 * lead_speed) * np.sin(heading_diff)
                     ) >= MIN_OVERTAKE_WIDTH_M)
+
+        if (
+            lead_speed < 1.0 /3.6
+            and ctx.min_forward_overtake_width >= MIN_OVERTAKE_WIDTH_M
+        ):
+            return "overtake"
 
         if (
             not ctx.has_left_side_vehicle
@@ -818,11 +827,9 @@ class FollowState(DrivingState):
             and is_ttc_close
             and has_future_width
             and is_same_lane
-            and has_long_gap
+            # and has_long_gap
         ):
             return "overtake"
-        #--------------------------------- version 2 ---------------------------------
-
 
         ##########################################
         # follow -> recovery
@@ -843,9 +850,8 @@ class FollowState(DrivingState):
         return None
 
     def get_adjusted_v_max_mps(self, ctx: StateContext) -> float:
-        """Compute dynamic v_max [km/h] with strict distance governor and side-vehicle yielding."""
+        """Compute dynamic v_max [m/s] with a gap PD controller and side-vehicle yielding."""
         # If a side-vehicle is alongside and clearance is insufficient, yield by reducing speed
-        max_side = max(ctx.overtake_width_left, ctx.overtake_width_right)
         if ctx.has_side_vehicle and (
             ctx.forward_vehicle_distance is not None
             and ctx.forward_vehicle_distance < FOLLOW_STOP_DISTANCE_M
@@ -857,15 +863,33 @@ class FollowState(DrivingState):
             # side_speed = ctx.side_vehicle_speed * 3.6 if ctx.side_vehicle_speed is not None else VEHICLE_V_MAX
             # return float(np.clip(VEHICLE_V_MAX, 0.0, (VEHICLE_V_MAX)))
 
-        if ctx.forward_vehicle_distance is None:
-            return VEHICLE_V_MAX
+        if ctx.forward_vehicle_distance is None or ctx.forward_vehicle_speed is None:
+            return VEHICLE_V_MAX / 3.6
 
         v_ego = ctx.velocity
-        d_des = D0_M + TIME_HEADWAY_SEC * v_ego # 一定時間の停止距離を含めた車間制御
-        # v_cmd = ctx.forward_vehicle_speed + FOLLOW_K_GAP * (ctx.forward_vehicle_gap - d_des) + FOLLOW_K_V * (ctx.forward_vehicle_speed - v_ego)
-        v_cmd = ctx.forward_vehicle_speed + FOLLOW_K_V * (ctx.forward_vehicle_speed - v_ego)
-        # if ctx.forward_vehicle_speed > FOLLOW_LEADER_MOVING_MPS:
-        #     v_cmd = max(v_cmd, FOLLOW_MIN_SPEED_KMH)
+        v_lead = ctx.forward_vehicle_speed
+
+        # バンパー間ギャップ。forward_vehicle_distance は参照経路沿いの中心間距離
+        # (ADR-027) なので全長を引く。ctx.forward_vehicle_gap は
+        # _build_state_context で代入されておらず常に 0.0 なので使わない。
+        gap = max(0.0, ctx.forward_vehicle_distance - VEHICLE_LENGTH)
+
+        # 追い越せる幅があるうちは D0_M まで詰めて追い越しの助走を作る。
+        # 幅が無いときは FOLLOW_TARGET_DISTANCE_M の安全車間を保つ。
+        d_des = (
+            D0_M
+            if ctx.min_forward_overtake_width >= MIN_OVERTAKE_WIDTH_M
+            else FOLLOW_TARGET_DISTANCE_M
+        )
+
+        # P項: 車間誤差 → 速度 / D項: 相対速度ダンピング
+        # gap == d_des かつ v_ego == v_lead で v_cmd == v_lead となり定常偏差は残らない。
+        # 詰まりすぎたときは v_cmd が負になり、下の clip で 0 (フルブレーキ) に落ちる。
+        v_cmd = (
+            v_lead
+            + FOLLOW_K_GAP * (gap - d_des)
+            + FOLLOW_K_V * (v_lead - v_ego)
+        )
 
         return float(np.clip(v_cmd, 0.0, (VEHICLE_V_MAX / 3.6)))
 
