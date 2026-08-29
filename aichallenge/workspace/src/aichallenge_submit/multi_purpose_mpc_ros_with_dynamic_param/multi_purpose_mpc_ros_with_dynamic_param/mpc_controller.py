@@ -1237,6 +1237,7 @@ class MPCController(Node):
             is_in_recovery_cooldown=is_cooldown,
             # boost使用時に以下をコメントアウト。
             publish_boost=self._publish_boost,
+            log_event=self.get_logger().info,
         )
 
     def _apply_state_params(self, params: MPCStateParams) -> None:
