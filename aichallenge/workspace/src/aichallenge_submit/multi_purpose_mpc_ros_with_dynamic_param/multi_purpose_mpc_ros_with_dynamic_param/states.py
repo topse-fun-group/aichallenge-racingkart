@@ -55,7 +55,7 @@ SIDE_VEHICLE_ANGLE_MAX_DEG = 90.0  # [deg] 横最大検知角度
 # follow state parameter
 # ---------------------------------------------------------------------------
 D0_M                        = 0.7   # [m] 追従時の停止目標車間距離 (default: 1.5)
-TIME_HEADWAY_SEC            = 0.35  # [s] 追従時に車間距離を縮める期待時間 (default: 0.35)
+TIME_HEADWAY_SEC            = 0.8  # [s] 追従時に車間距離を縮める期待時間 (default: 0.35)
 FORWARD_FOLLOW_DISTANCE_M   = 5.0   # [m] 追従を行う前方車両との車間距離 (default: 4.0)
 FOLLOW_CLEAR_HYSTERESIS_SEC = 1.0   # [s] 追従状態を維持する最低時間 (チャタリング防止)
 FOLLOW_STOP_DISTANCE_M      = 0.8   # [m] (完全停止・ブレーキ閾値、遅延を考慮)
@@ -68,7 +68,7 @@ FOLLOW_TARGET_DISTANCE_M    = 1.5
 # ---------------------------------------------------------------------------
 # overtake state parameter
 # ---------------------------------------------------------------------------
-MIN_OVERTAKE_WIDTH_M      = 2.8     # [m] 最低追い越し幅 (default 2.5)
+MIN_OVERTAKE_WIDTH_M      = 2.6     # [m] 最低追い越し幅 (default 2.5)
 MIN_OVERTAKE_LEAD_SPEED   = 25.0    # [km/s] 前方車両の最低追い越し速度
 OVERTAKE_CLOSING_MARGIN_M = 1.0     # [m] 追い越し時の車間距離の余裕距離
 OVERTAKE_TTC_SEC          = 0.3     # [s] TTCの時間
@@ -729,11 +729,11 @@ class RecoveryState(DrivingState):
         lock = self.RECOVERY_STEER_LOCK_RAD
 
         if self._phase == "back":
-            steer_cmd = float(np.clip(RECOVERY_STEER_K * e_psi, -lock, lock))
+            steer_cmd = float(np.clip(RECOVERY_STEER_K * e_psi + 0.3 * ctx.path_e_y, -lock, lock))
             return (self.RECOVERY_BACK_TURN_SPEED_MPS, steer_cmd, self.RECOVERY_BACK_ACCEL_MPSS)
 
         # phase == "forward_turn" (前進旋回)
-        steer_cmd = float(np.clip(-RECOVERY_STEER_K * e_psi, -lock, lock))
+        steer_cmd = float(np.clip(-RECOVERY_STEER_K * e_psi - 0.3 * ctx.path_e_y, -lock, lock))
         return (self.RECOVERY_FORWARD_TURN_SPEED_MPS, steer_cmd, self.RECOVERY_FORWARD_ACCEL_MPSS)
 
 
@@ -875,13 +875,13 @@ class FollowState(DrivingState):
         is_closing = speed_diff >= (
             (
                 ctx.forward_vehicle_gap + VEHICLE_LENGTH + OVERTAKE_CLOSING_MARGIN_M
-            ) / 0.4
+            ) / 0.8 #default: 0.4
         )
 
         # 車間距離が(停止車間距離 + 瞬間詰め距離 + オフセット距離)以下であるかどうか
         is_settled_behind = (
             ctx.forward_vehicle_gap
-            <= D0_M + TIME_HEADWAY_SEC * ctx.velocity + 0.4 * 2.5 * TIME_HEADWAY_SEC**2 + OVERTAKE_CLOSING_MARGIN_M)
+            <= D0_M + TIME_HEADWAY_SEC * ctx.velocity + 0.8 * 2.5 * TIME_HEADWAY_SEC**2 + OVERTAKE_CLOSING_MARGIN_M)
 
         is_ttc_close = is_closing or is_settled_behind
 
