@@ -253,6 +253,12 @@ class MPCController(Node):
             "recovery_boost_duration_sec": ("RECOVERY_BOOST_DURATION_SEC", float(states.RECOVERY_BOOST_DURATION_SEC)),
             "min_overtake_width_m": ("MIN_OVERTAKE_WIDTH_M", float(states.MIN_OVERTAKE_WIDTH_M)),
             "min_overtake_lead_speed": ("MIN_OVERTAKE_LEAD_SPEED", float(states.MIN_OVERTAKE_LEAD_SPEED)),
+            "overtake_target_speed_kmh": ("OVERTAKE_TARGET_SPEED_KMH", float(states.OVERTAKE_TARGET_SPEED_KMH)),
+            "overtake_corner_kappa": ("OVERTAKE_CORNER_KAPPA", float(states.OVERTAKE_CORNER_KAPPA)),
+            "overtake_corner_lookahead_m": ("OVERTAKE_CORNER_LOOKAHEAD_M", float(states.OVERTAKE_CORNER_LOOKAHEAD_M)),
+            "overtake_corner_max_dist_m": ("OVERTAKE_CORNER_MAX_DIST_M", float(states.OVERTAKE_CORNER_MAX_DIST_M)),
+            "overtake_corner_speed_margin_mps": ("OVERTAKE_CORNER_SPEED_MARGIN_MPS", float(states.OVERTAKE_CORNER_SPEED_MARGIN_MPS)),
+            "overtake_commit_sec": ("OVERTAKE_COMMIT_SEC", float(states.OVERTAKE_COMMIT_SEC)),
             "overtake_closing_margin_m": ("OVERTAKE_CLOSING_MARGIN_M", float(states.OVERTAKE_CLOSING_MARGIN_M)),
             "overtake_ttc_sec": ("OVERTAKE_TTC_SEC", float(states.OVERTAKE_TTC_SEC)),
             "overtake_passed_clearance_m": ("OVERTAKE_PASSED_CLEARANCE_M", float(states.OVERTAKE_PASSED_CLEARANCE_M)),
@@ -722,7 +728,18 @@ class MPCController(Node):
                 # このガードを落とすと幅 0 のとき 0.7m のオフセットが出てしまう。
                 side = "none"
             else:
-                side = "left" if ctx.overtake_width_left >= ctx.overtake_width_right else "right"
+                # 参照経路は traj_mincurv (最小曲率ライン) でコーナーではインにつくため、
+                # 残った空き幅は外側に偏る (コーナーの約 72%)。そのまま「広い側」を選ぶと
+                # 弧長の長い外側を通ることになり、同じ速度では追い越せない。
+                # コーナーでは内側が最低幅を満たす限り内側 (弧長が短い側) を優先する。
+                inside = "left" if ctx.path_kappa > 0.0 else "right"
+                inside_w = (ctx.overtake_width_left if inside == "left"
+                            else ctx.overtake_width_right)
+                if (abs(ctx.path_kappa) > states.OVERTAKE_CORNER_KAPPA
+                        and inside_w >= states.MIN_OVERTAKE_WIDTH_M):
+                    side = inside
+                else:
+                    side = "left" if ctx.overtake_width_left >= ctx.overtake_width_right else "right"
 
             if side == "none":
                 target_offset = 0.0
@@ -794,6 +811,7 @@ class MPCController(Node):
         wps = self._reference_path.waypoints
         n_wps = len(wps)
         self._waypoint_xy = np.asarray([(wp.x, wp.y) for wp in wps], dtype=np.float64)
+        self._waypoint_kappa = np.asarray([wp.kappa for wp in wps], dtype=np.float64)
 
         seg_lens = [
             float(np.hypot(wps[(i + 1) % n_wps].x - wps[i].x, wps[(i + 1) % n_wps].y - wps[i].y))
@@ -1175,6 +1193,13 @@ class MPCController(Node):
         dy = pose.y - closest_wp.y
         path_e_y = float(-dx * np.sin(path_psi) + dy * np.cos(path_psi))
 
+        # 追い越しに必要な距離だけ先読みし、その区間で最も曲率が大きい点の
+        # 符号付き曲率を取る。コーナーの強さと向き (正 = 左) を 1 値で表す。
+        n_look = max(1, int(states.OVERTAKE_CORNER_LOOKAHEAD_M / self._wp_spacing))
+        look_idxs = (closest_idx + np.arange(n_look)) % len(self._waypoint_kappa)
+        kappa_window = self._waypoint_kappa[look_idxs]
+        path_kappa = float(kappa_window[np.argmax(np.abs(kappa_window))])
+
         fwd_heading_diff = 0.0
         if fwd_heading is not None:
             diff = (fwd_heading - path_psi + np.pi) % (2 * np.pi) - np.pi
@@ -1190,6 +1215,7 @@ class MPCController(Node):
             is_colliding=is_colliding,
             path_psi=path_psi,
             path_e_y=path_e_y,
+            path_kappa=path_kappa,
             forward_vehicle_distance=fwd_dist,
             forward_vehicle_speed=fwd_speed,
             forward_vehicle_heading_diff=fwd_heading_diff,
@@ -1355,6 +1381,11 @@ class MPCController(Node):
             # ステア (lookahead は 35 km/h ベース) は既存チューニングを崩さないよう触らない。
             if follow_target_speed_mps is not None:
                 v_target = follow_target_speed_mps
+            elif isinstance(current_state, states.OvertakeState):
+                # OvertakeState: 車両上限を超える目標速度を出して常時フルスロットルにする。
+                # 35 km/h 固定は AWSIM の drive-fade 平衡 (約 35.7 km/h) を下回るため、
+                # 追い越しに入った瞬間 acc = KP*(u[0]-v) が a_min (フルブレーキ) になっていた。
+                v_target = kmh_to_m_per_sec(states.OVERTAKE_TARGET_SPEED_KMH)
 
             u = [v_target, steer_target]
             max_delta = steer_target
