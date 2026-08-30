@@ -259,6 +259,10 @@ class MPCController(Node):
             "overtake_corner_max_dist_m": ("OVERTAKE_CORNER_MAX_DIST_M", float(states.OVERTAKE_CORNER_MAX_DIST_M)),
             "overtake_corner_speed_margin_mps": ("OVERTAKE_CORNER_SPEED_MARGIN_MPS", float(states.OVERTAKE_CORNER_SPEED_MARGIN_MPS)),
             "overtake_commit_sec": ("OVERTAKE_COMMIT_SEC", float(states.OVERTAKE_COMMIT_SEC)),
+            "overtake_abort_width_m": ("OVERTAKE_ABORT_WIDTH_M", float(states.OVERTAKE_ABORT_WIDTH_M)),
+            "overtake_hard_abort_width_m": ("OVERTAKE_HARD_ABORT_WIDTH_M", float(states.OVERTAKE_HARD_ABORT_WIDTH_M)),
+            "overtake_predict_horizon_sec": ("OVERTAKE_PREDICT_HORIZON_SEC", float(states.OVERTAKE_PREDICT_HORIZON_SEC)),
+            "overtake_predict_lat_accel_mpss": ("OVERTAKE_PREDICT_LAT_ACCEL_MPSS", float(states.OVERTAKE_PREDICT_LAT_ACCEL_MPSS)),
             "overtake_closing_margin_m": ("OVERTAKE_CLOSING_MARGIN_M", float(states.OVERTAKE_CLOSING_MARGIN_M)),
             "overtake_ttc_sec": ("OVERTAKE_TTC_SEC", float(states.OVERTAKE_TTC_SEC)),
             "overtake_passed_clearance_m": ("OVERTAKE_PASSED_CLEARANCE_M", float(states.OVERTAKE_PASSED_CLEARANCE_M)),
@@ -718,29 +722,12 @@ class MPCController(Node):
             # 先行車両の横端からの追い越しラインとする。実際の座標はセンターラインから
             # 先行車両の車幅の半分の最大0.725m未満+先行車両との横マージン0.225mだけ
             # ずらした位置が実際の追い越し時の座標になる
-            # 寄せ側の決定。shift_side が渡されたとき (FollowState) はデッドバンド +
-            # dwell 済みのラッチ判定を使い、"none" ならセンターラインを走る。
-            # 渡されないとき (OvertakeState) は従来どおり毎 tick の幅比較で決める。
-            if shift_side is not None:
-                side = shift_side
-            elif abs(ctx.target_overtake_offset) <= 0.1:
-                # 前方にも側方にも車がいない (_compute_v2x_overtake_corridor が 0 を返す)。
-                # このガードを落とすと幅 0 のとき 0.7m のオフセットが出てしまう。
-                side = "none"
-            else:
-                # 参照経路は traj_mincurv (最小曲率ライン) でコーナーではインにつくため、
-                # 残った空き幅は外側に偏る (コーナーの約 72%)。そのまま「広い側」を選ぶと
-                # 弧長の長い外側を通ることになり、同じ速度では追い越せない。
-                # コーナーでは内側が最低幅を満たす限り内側 (弧長が短い側) を優先する。
-                inside = "left" if ctx.path_kappa > 0.0 else "right"
-                inside_w = (ctx.overtake_width_left if inside == "left"
-                            else ctx.overtake_width_right)
-                if (abs(ctx.path_kappa) > states.OVERTAKE_CORNER_KAPPA
-                        and inside_w >= states.MIN_OVERTAKE_WIDTH_M):
-                    side = inside
-                else:
-                    side = "left" if ctx.overtake_width_left >= ctx.overtake_width_right else "right"
-
+            # 寄せ側の決定。shift_side が渡されたとき (OvertakeState) は突入時に
+            # ラッチした側を使う。渡されないときだけ毎 tick 引き直す。
+            # 寄せ側は states.resolve_overtake_side に集約している。状態機械 (中断判定)
+            # と Pure Pursuit が別々の式で側を決めていると、内側へ寄せているのに
+            # 広い側の幅で中断判定するという食い違いが起きる (ADR-031)。
+            side = shift_side if shift_side is not None else states.resolve_overtake_side(ctx)
             if side == "none":
                 target_offset = 0.0
             elif side == "left":
@@ -825,6 +812,27 @@ class MPCController(Node):
         self._track_length = float(cum_s + seg_lens[-1])
         # Mean waypoint spacing, used to convert a lookahead distance into a waypoint count
         self._wp_spacing = max(self._track_length / max(n_wps, 1), 1e-3)
+
+        # 回頭角 (= |∫kappa ds|) が TIGHT_CORNER_MAX_TURN_DEG 未満のコーナー区間に印を付ける。
+        # kappa = wrap(psi_ahead - psi_behind) / ds なので kappa*ds の総和は方位差そのもの。
+        # ここで印を付けた区間だけ、走行中に曲率から速度上限を掛ける。
+        ds = np.diff(self._waypoint_s, append=self._track_length)
+        kap = self._waypoint_kappa
+        self._waypoint_tight_corner = np.zeros(n_wps, dtype=bool)
+        i = 0
+        while i < n_wps:
+            if abs(kap[i]) <= states.OVERTAKE_CORNER_KAPPA:
+                i += 1
+                continue
+            j = i
+            while (j + 1 < n_wps
+                   and abs(kap[j + 1]) > states.OVERTAKE_CORNER_KAPPA
+                   and np.sign(kap[j + 1]) == np.sign(kap[i])):
+                j += 1
+            turn = abs(float(np.sum(kap[i:j + 1] * ds[i:j + 1])))
+            if turn < np.deg2rad(states.TIGHT_CORNER_MAX_TURN_DEG):
+                self._waypoint_tight_corner[i:j + 1] = True
+            i = j + 1
 
     def _path_s_of(self, x: float, y: float) -> Tuple[float, int]:
         """Arc-length position along the reference path [m], interpolated within the segment.
@@ -974,15 +982,15 @@ class MPCController(Node):
 
     def _compute_v2x_overtake_corridor(
         self, fwd_pos: Optional[Tuple[float, float]]
-    ) -> Tuple[float, float, float]:
-        """Compute available road widths (left, right) and optimal target overtake offset using ReferencePath.
+    ) -> Tuple[float, float, float, float]:
+        """Compute available road widths (left, right), target overtake offset, and the path heading at the leader.
 
         Returns
         -------
         (overtake_width_left, overtake_width_right, target_overtake_offset)
         """
         if fwd_pos is None or self._waypoint_xy is None or len(self._waypoint_xy) == 0:
-            return 0.0, 0.0, 0.0
+            return 0.0, 0.0, 0.0, 0.0
 
         vx, vy = fwd_pos
         fwd_xy = np.array([vx, vy], dtype=np.float64)
@@ -1023,7 +1031,7 @@ class MPCController(Node):
         else:
             target_offset = float(np.clip(offset_right, -2.5, -0.8))
 
-        return float(avail_left), float(avail_right), float(target_offset)
+        return float(avail_left), float(avail_right), float(target_offset), float(path_psi)
 
     def _scan_surrounding_vehicles(
         self,
@@ -1092,7 +1100,7 @@ class MPCController(Node):
                     and x_rel > 0.0
                     and abs(y_rel) <= states.FORWARD_LATERAL_MAX):
                     # and abs(y_rel) <= 7.0):
-                left_w, right_w, _ = self._compute_v2x_overtake_corridor((vx_pos, vy_pos))
+                left_w, right_w, _, _ = self._compute_v2x_overtake_corridor((vx_pos, vy_pos))
                 max_avail_w = max(left_w, right_w)
                 fwd_vehicles.append((s_rel, x_rel, y_rel, v_speed, (vx_pos, vy_pos), max_avail_w))
 
@@ -1152,7 +1160,17 @@ class MPCController(Node):
             side_speed,
             nearest_s_rel,
         ) = self._detect_forward_and_side_vehicles()
-        left_w, right_w, target_offset = self._compute_v2x_overtake_corridor(corridor_pos)
+        left_w, right_w, target_offset, leader_psi = self._compute_v2x_overtake_corridor(
+            corridor_pos)
+
+        # 先行車の速度方位は「先行車位置の経路方位」と比べる。自車の経路方位と比べると、
+        # 車間 4m・R=6.7m のコーナーで経路自体が 34 度回る分がそのまま誤差になり、
+        # sin(heading_diff) が先行車の横移動ではなく曲率に支配される (ADR-034)。
+        fwd_heading_diff = 0.0
+        if fwd_heading is not None:
+            fwd_heading_diff = float(
+                (fwd_heading - leader_psi + np.pi) % (2 * np.pi) - np.pi)
+
 
         (
             has_fwd,
@@ -1199,15 +1217,26 @@ class MPCController(Node):
         look_idxs = (closest_idx + np.arange(n_look)) % len(self._waypoint_kappa)
         kappa_window = self._waypoint_kappa[look_idxs]
         path_kappa = float(kappa_window[np.argmax(np.abs(kappa_window))])
+        in_tight_corner = bool(self._waypoint_tight_corner[look_idxs].any())
 
-        fwd_heading_diff = 0.0
-        if fwd_heading is not None:
-            diff = (fwd_heading - path_psi + np.pi) % (2 * np.pi) - np.pi
-            fwd_heading_diff = float(diff)
+        # T 秒後の左右の幅。回頭角 120 度未満のコーナーでだけ予測する。
+        # 直線で予測を掛けると、加速度項がコース幅を超えて片側を 0 に飽和させ、
+        # ノイジーな heading_diff (先行車 25km/h で方位ノイズ σ≈22deg) の符号だけで
+        # 寄せ側が決まって毎 tick 反転する。将来幅 = 現在幅 にすると
+        # resolve_overtake_side の min(now, future) が min(now, now) に退化し、
+        # 「現在幅が広い側」という安定した判定に戻る (ADR-034 追記)。
+        if in_tight_corner:
+            left_wf, right_wf = states.predict_overtake_widths(
+                left_w, right_w,
+                fwd_speed if fwd_speed is not None else 0.0,
+                fwd_heading_diff)
+        else:
+            left_wf, right_wf = left_w, right_w
 
         return StateContext(
             current_time_sec=now_sec,
             dt=dt,
+            state_id=self._vehicle_id,
             pose_x=pose.x,
             pose_y=pose.y,
             pose_theta=pose.theta,
@@ -1216,6 +1245,7 @@ class MPCController(Node):
             path_psi=path_psi,
             path_e_y=path_e_y,
             path_kappa=path_kappa,
+            in_tight_corner=in_tight_corner,
             forward_vehicle_distance=fwd_dist,
             forward_vehicle_speed=fwd_speed,
             forward_vehicle_heading_diff=fwd_heading_diff,
@@ -1223,6 +1253,8 @@ class MPCController(Node):
             overtake_width_left=left_w,
             overtake_width_right=right_w,
             target_overtake_offset=target_offset,
+            overtake_width_left_future=left_wf,
+            overtake_width_right_future=right_wf,
             lateral_shift_side=self._shift_side_filter.update(left_w, right_w, now_sec),
             has_side_vehicle=has_side,
             side_vehicle_speed=side_speed,
@@ -1368,9 +1400,11 @@ class MPCController(Node):
 
             # ---- Control Selection (Waypoint-Shift Pure Pursuit for Follow/Overtake, Pure Pursuit otherwise) ----
             if current_state.control_mode == ControlMode.WAYPOINT_SHIFT_PURE_PURSUIT:
-                # FollowState だけデッドバンド + dwell 付きの寄せ側を渡す。
-                # Overtake は幅の差が大きい場面に限られるため従来どおり毎 tick 判定。
-                shift_side = ctx.lateral_shift_side if isinstance(current_state, FollowState) else None
+                # 追い越し中は突入時にラッチした側で操舵する。毎 tick 引き直すと、
+                # ノイジーな heading_diff で寄せ側が反転し、中断判定 (ラッチ側) と
+                # 食い違って左右に振れる (ADR-034 追記)。
+                shift_side = (current_state._overtake_side
+                              if isinstance(current_state, states.OvertakeState) else None)
                 v_target, steer_target = self._compute_waypoint_shift_pure_pursuit_control(
                     pose, v, ctx, shift_side)
             else:
@@ -1387,6 +1421,14 @@ class MPCController(Node):
                 # 35 km/h 固定は AWSIM の drive-fade 平衡 (約 35.7 km/h) を下回るため、
                 # 追い越しに入った瞬間 acc = KP*(u[0]-v) が a_min (フルブレーキ) になっていた。
                 v_target = kmh_to_m_per_sec(states.OVERTAKE_TARGET_SPEED_KMH)
+
+            # 回頭角 120 度未満のコーナーでは曲率から速度上限を掛ける。速度プロファイル
+            # (reference_path.compute_speed_profile) と同じ v = sqrt(ay_max / |kappa|)。
+            # ref_vel.yaml の区間速度は単位不整合で効いておらず、全コーナーで 42km/h を
+            # 目標にしていたため、曲がりきれずに壁へ向かっていた (ADR-033)。
+            if ctx.in_tight_corner:
+                v_corner = np.sqrt(self._mpc_cfg.ay_max / (abs(ctx.path_kappa) + 1e-6))
+                v_target = min(v_target, v_corner)
 
             u = [v_target, steer_target]
             max_delta = steer_target

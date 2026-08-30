@@ -87,19 +87,35 @@ OVERTAKE_TARGET_SPEED_KMH        = 50.0  # [km/h]
 # 構造的に外側へ偏る。外側は弧長が長く同じ速度では抜けないため、
 # 「内側が空いているコーナー」に限って積極的に仕掛ける。
 OVERTAKE_CORNER_KAPPA            = 0.05  # [1/m] これを超えたらコーナー扱い (R=20m)
+# 回頭角がこれ未満のコーナーでは、曲率から速度上限を掛ける。
+# ref_vel.yaml の区間速度は km/h と m/s の単位不整合で常に v_max に飽和し、
+# 全コーナーで 42km/h を目標にしてしまっているため (ADR-033)。
+# ヘアピン (>= この角度) は従来どおり据え置く。
+TIGHT_CORNER_MAX_TURN_DEG        = 120.0  # [deg]
 OVERTAKE_CORNER_LOOKAHEAD_M      = 15.0  # [m] コーナー判定の先読み距離
 OVERTAKE_CORNER_MAX_DIST_M       = 6.0   # [m] 仕掛ける最大車間 (中心間)
-OVERTAKE_CORNER_SPEED_MARGIN_MPS = 0.0   # [m/s] 必要な相対速度の下限
+OVERTAKE_CORNER_SPEED_MARGIN_MPS = 2.0   # [m/s] 必要な相対速度の下限。
+                                         # 0.0 は実質無条件で、実測の成功率は 23%。
+                                         # 実速度差を要求する条件は 93〜100% だった。
 OVERTAKE_COMMIT_SEC              = 1.5   # [s] 幅不足・ロストでも中断しない最低継続時間
+OVERTAKE_HARD_ABORT_WIDTH_M      = 1.5   # [m] 幅が崩壊。コミット期間を無視して即中断
+OVERTAKE_PREDICT_HORIZON_SEC     = 2.0   # [s] 先行車位置の予測ホライズン
+OVERTAKE_PREDICT_LAT_ACCEL_MPSS  = 0.6   # [m/s^2] 先行車の横方向加速度の見積り。
+                                         # 0.5*A*T^2 がコース幅 (半幅 約3m) を超えると
+                                         # 片側の将来幅が必ず 0 に飽和し、寄せ側が
+                                         # sign(heading_diff) だけで決まってしまう。
+OVERTAKE_ABORT_WIDTH_M           = 2.3   # [m] 寄せ側がこれを下回ったら中断
+                                         #     突入は MIN_OVERTAKE_WIDTH_M (2.6) で、
+                                         #     二段閾値にしてノイズでの往復を防ぐ
 
 # ---------------------------------------------------------------------------
 # recovery state parameter
 # ---------------------------------------------------------------------------
 RECOVERY_ALIGNED_HEADING_DEG = 5.0  # [deg] 復帰完了とみなす経路との角度差
 RECOVERY_ALIGNED_E_Y_M       = 0.5   # [m]   復帰完了とみなすセンターラインからの距離
-RECOVERY_STEER_K             = 1.5   # [-]   経路との角度差 → 舵角のゲイン
+RECOVERY_STEER_K             = 1.8   # [-]   経路との角度差 → 舵角のゲイン
                                      #       1.0 = ずれた角度分そのまま切る
-RECOVERY_BOOST_VALUE         = 1.5   # [-]   復帰後の boost 値 (OvertakeState と同値)
+RECOVERY_BOOST_VALUE         = 0.0   # [-]   復帰後の boost 値 (OvertakeState と同値)
 RECOVERY_BOOST_DURATION_SEC  = 2.0   # [s]   復帰後に boost を維持する時間
 
 # ---------------------------------------------------------------------------
@@ -144,6 +160,7 @@ class StateContext:
     dt: float                 # time since last control loop [s]
 
     # --- Vehicle state ------------------------------------------------------
+    state_id: str
     pose_x: float             # [m]
     pose_y: float             # [m]
     pose_theta: float         # yaw [rad]
@@ -158,6 +175,7 @@ class StateContext:
     path_psi: float = 0.0        # closest waypoint orientation [rad]
     path_e_y: float = 0.0        # signed lateral offset from path centerline [m]
     path_kappa: float = 0.0      # [1/m] 先読み区間で最も曲率が大きい点の符号付き曲率
+    in_tight_corner: bool = False  # 先読み区間に回頭角 120 度未満のコーナーがあるか
                                  #       正 = 左コーナー (内側が左)
 
     # --- V2X (Phase 2) ------------------------------------------------------
@@ -172,6 +190,10 @@ class StateContext:
     overtake_width_right: float = 0.0     # [m] 車両の右の外端から道路端（壁マージン考慮）までの空き幅
     target_overtake_offset: float = 0.0   # dynamic lateral offset [m] for centerline of free space
     lateral_shift_side: str = "none"      # "left" | "right" | "none" — デッドバンド + dwell 適用後の寄せ側
+    # T 秒後の先行車位置でコリドーを引き直した幅。先行車の横移動だけでなく、
+    # コーナーでコース幅 (wp.ub / wp.lb) 自体が変わる効果も入る。
+    overtake_width_left_future: float = 0.0   # [m]
+    overtake_width_right_future: float = 0.0  # [m]
     has_side_vehicle: bool = False        # True if another vehicle is alongside (-2.5m <= x_rel <= 2.5m)
     side_vehicle_speed: Optional[float] = None  # speed of side vehicle [m/s]
 
@@ -203,6 +225,65 @@ class StateContext:
 # TODO: 調整中である。左右のステアリング切り返しのチャタリングが十分に抑えられてないため、
 # FollowStateはsimple pure pursuitを使用中である。しかし、以下の調整でチャタリングが
 # の抑制が確認でき次第、FollowStateにwaypoint shift pure pursuitを適用する
+def resolve_overtake_side(ctx: StateContext) -> str:
+    """追い越しで実際に寄せる側 ("left" | "right" | "none")。
+
+    Pure Pursuit (mpc_controller) と状態機械がこの 1 つの関数を共有することで、
+    「内側へ寄せているのに広い側の幅で中断判定する」食い違いを無くす (ADR-031)。
+
+    側は **今と T 秒後の狭い方**で採点して広い側を選ぶ。将来幅だけで選ぶと、
+    「今は塞がっているが 1 秒後に開く側」を掴んでしまい、中断判定は現在幅を見るので
+    突入直後に hard_narrow で弾かれる (実測 34 件中 9 件が突入時点で 1.5m 未満)。
+    ADR-031 の「コーナーは弧長が短い内側」も撤回済み。参照経路が最小曲率ラインで
+    既にインについているため内側には壁までの余地が無く、実測で内側 18% / 外側 31%
+    (|kappa| 0.08-0.15) と逆効果だった (ADR-032)。
+    """
+    if abs(ctx.target_overtake_offset) <= 0.1:
+        return "none"          # 前方にも側方にも車がいない
+    left_w = min(ctx.overtake_width_left, ctx.overtake_width_left_future)
+    right_w = min(ctx.overtake_width_right, ctx.overtake_width_right_future)
+    return "left" if left_w >= right_w else "right"
+
+
+def predict_overtake_widths(left: float, right: float,
+                            lead_speed: float, heading_diff: float):
+    """T 秒後の左右の空き幅 (left_future, right_future) を返す。
+
+    先行車の速度をセンターライン法線方向に分解し、横加速度
+    OVERTAKE_PREDICT_LAT_ACCEL_MPSS で T 秒進んだ移動量 d を左右に加減する。
+    先行車が左へ寄る (heading_diff > 0) なら左が狭まり右が広がる。
+
+    経路相対で計算するので、先行車の位置をグローバル座標で直線外挿する方式のように
+    コーナーで予測点が外側の壁へ飛び出し「内側が広い」と誤認する破綻が起きない
+    (R=6m / 25km/h で外側へ 3.2m ずれていた。ADR-034)。
+    """
+    T = OVERTAKE_PREDICT_HORIZON_SEC
+    sin_hd = np.sin(heading_diff)
+    # 向きは heading_diff の符号で決める。v_lat の符号から取ると、先行車が
+    # 停止しているときに加速度項まで消えてしまう。
+    d = (lead_speed * sin_hd * T
+         + 0.5 * OVERTAKE_PREDICT_LAT_ACCEL_MPSS * T * T * np.sign(sin_hd))
+    return max(0.0, left - d), max(0.0, right + d)
+
+
+def overtake_width_of(ctx: StateContext, side: str) -> float:
+    """指定した側の空き幅 [m]。"none" は 0.0。"""
+    if side == "left":
+        return ctx.overtake_width_left
+    if side == "right":
+        return ctx.overtake_width_right
+    return 0.0
+
+
+def overtake_width_future_of(ctx: StateContext, side: str) -> float:
+    """指定した側の T 秒後の空き幅 [m]。"none" は 0.0。"""
+    if side == "left":
+        return ctx.overtake_width_left_future
+    if side == "right":
+        return ctx.overtake_width_right_future
+    return 0.0
+
+
 class LateralShiftSideFilter:
     """左右の空き幅差から「どちら側へ寄せるか」を決める。二段閾値 + ラッチ + dwell 付き。
 
@@ -310,6 +391,39 @@ class DrivingState(ABC):
         """Called once when leaving this state."""
         pass
 
+    def _log_side(self, ctx: StateContext) -> str:
+        """ログに出す寄せ側。Overtake は突入時にラッチした側を上書きする。"""
+        return resolve_overtake_side(ctx)
+
+    def _exit(self, ctx: StateContext, next_state: str, reason: str) -> str:
+        """離脱理由と、その判断に使った値を 1 行残してから遷移先を返す。
+
+        [StateManager] の遷移ログだけでは overtake -> follow_path が「本当に抜けた」のか
+        「見失った」のか区別できず、成功率が測定できない。
+        3 状態で同じ実装をコピペしていたため同じバグを 3 か所に抱えていたので、
+        ここに集約する。
+        """
+        if ctx.log_event is None:
+            return next_state
+
+        def num(x, scale=1.0, fmt="{:.2f}"):
+            return "None" if x is None else fmt.format(x * scale)
+
+        enter_time = getattr(self, "_enter_time", None)
+        elapsed = ctx.current_time_sec - enter_time if enter_time is not None else 0.0
+        side = self._log_side(ctx)
+        ctx.log_event(
+            f"[{self.name}] exit reason={reason} to={next_state} elapsed={elapsed:.2f}s"
+            f" | vehicleID={ctx.state_id}"
+            f" ego_v={num(ctx.velocity, 3.6)}"
+            f" forward_v={num(ctx.forward_vehicle_speed, 3.6)}"
+            f" gap={num(ctx.forward_vehicle_distance)}"
+            f" side={side} side_w={overtake_width_of(ctx, side):.2f}"
+            f" min_w={ctx.min_forward_overtake_width:.2f}"
+            f" kappa={ctx.path_kappa:+.3f}"
+            f" offset={num(ctx.target_overtake_offset)}")
+        return next_state
+
 
 class FollowPathState(DrivingState):
     """Normal path-following — no obstacles or vehicles ahead.
@@ -348,25 +462,6 @@ class FollowPathState(DrivingState):
     def on_enter(self, ctx: StateContext) -> None:
         self._enter_time = ctx.current_time_sec
 
-    def _exit(self, ctx: StateContext, next_state: str, reason: str) -> str:
-        """離脱理由を残してから遷移先を返す。
-
-        [StateManager] のログだけでは overtake -> follow_path が「本当に抜けた」のか
-        「見失った」のか区別できず、成功率が測定できないため。
-        """
-        if ctx.log_event is not None:
-            elapsed = (
-                ctx.current_time_sec - self._enter_time
-                if self._enter_time is not None else 0.0
-            )
-            ego_v = "None" if ctx.velocity is None else ctx.velocity * 3.6
-            forward_v = "None" if ctx.forward_vehicle_speed is None else ctx.forward_vehicle_distance * 3.6
-            distance = "None" if ctx.forward_vehicle_distance is None else ctx.forward_vehicle_distance
-            overtake_side = "left" if ctx.overtake_width_left >= ctx.overtake_width_right else "right"
-            overtake_width = "None" if ctx.min_forward_overtake_width is None else ctx.min_forward_overtake_width
-            overtake_offset = "None" if ctx.target_overtake_offset is None else ctx.target_overtake_offset
-            ctx.log_event(f"[FollowPath] exit reason={reason} to={next_state} elapsed={elapsed:.2f}s | ego_v={ego_v} forward_v={forward_v} gap={distance} overtake_side={overtake_side}, overtake_width={overtake_width} overtake_offset={overtake_offset}")
-        return next_state
 
     def check_transition(self, ctx: StateContext) -> Optional[str]:
 
@@ -375,13 +470,13 @@ class FollowPathState(DrivingState):
         ###################################################
 
         if ctx.is_colliding:
-            return "recovery"
+            return self._exit(ctx, "recovery", "collision")
 
         # Stuck detection: velocity near zero for too long → Recovery (unless in cooldown)
         if (not ctx.is_in_recovery_cooldown
                 and ctx.time_stopped_sec >= STUCK_DURATION
                 and ctx.velocity < STUCK_VELOCITY_THRESHOLD):
-            return "recovery"
+            return self._exit(ctx, "recovery", "stuck")
 
 
         ###################################################
@@ -391,7 +486,7 @@ class FollowPathState(DrivingState):
         # 前方に車両があり、追い越し幅が足りない → follow
         has_overtake_wide = ctx.min_forward_overtake_width > MIN_OVERTAKE_WIDTH_M
         if ctx.has_forward_vehicle and not has_overtake_wide:
-            return "follow"
+            return self._exit(ctx, "follow", "no_forward_vehicle_and_no_width")
 
 
         ###################################################
@@ -444,15 +539,15 @@ class FollowPathState(DrivingState):
                 lead_speed < 1.0 / 3.6
                 and ctx.min_forward_overtake_width >= MIN_OVERTAKE_WIDTH_M
             ):
-                return self._exit(ctx, "overtake", "stopping with width between Vf<=25km/h and Ve>=29km/h")
+                return self._exit(ctx, "overtake", "forward_vehicle_stop_with_width_between_Vf<=25km/h_and_Ve>=29km/h")
 
             if (
                 is_overtake_gap
                 and ctx.min_forward_overtake_width >= MIN_OVERTAKE_WIDTH_M
                 and has_future_width
-                and is_same_lane
+                # and is_same_lane # shift waypoint pure pursuit
             ):
-                return self._exit(ctx, "overtake", "safe between Vf<=25km/h and Ve>=29km/h")
+                return self._exit(ctx, "overtake", "safe_width_between_Vf<=25km/h_and_Ve>=29km/h")
 
         # Check Overtake condition
         #-------------------------- version 1 --------------------------
@@ -563,7 +658,7 @@ class FollowPathState(DrivingState):
                     lead_speed < 1.0 / 3.6
                     and ctx.min_forward_overtake_width >= MIN_OVERTAKE_WIDTH_M
                 ):
-                    return self._exit(ctx, "overtake", "stopping with width with enough distance")
+                    return self._exit(ctx, "overtake", "stop_with_width_in_enough_distance")
 
                 if (
                     not ctx.has_left_side_vehicle
@@ -572,10 +667,10 @@ class FollowPathState(DrivingState):
                     and is_slow_leader
                     and is_ttc_close
                     and has_future_width
-                    and is_same_lane
+                    # and is_same_lane # shift waypoint pure pursuit
                 ):
-                    return self._exit(ctx, "overtake", "safe with enough distance")
-                return self._exit(ctx, "follow", "not safe with enough distance")
+                    return self._exit(ctx, "overtake", "safe_width_with_enough_distance")
+                return self._exit(ctx, "follow", "not_safe_width_with_enough_distance")
         #-------------------------- version 3 --------------------------
         return None
 
@@ -615,8 +710,12 @@ class RecoveryState(DrivingState):
     デッドラインが出す (follow_path 以外へ直行しても確実に切るため)。
     """
 
-    BACK_DURATION_TIME_SEC = 1.6     # [s] 最大後退時間
-    FORWARD_DURATION_TIME_SEC = 3.0  # [s] 最大前進時間
+    BACK_DURATION_TIME_SEC = 2.0     # [s] 最大後退時間
+    FORWARD_DURATION_TIME_SEC = 1.5  # [s] 最大前進時間
+                                     # 前進フェーズの役割は姿勢を戻すことで、加速ではない。
+                                     # 3.0s だと整列条件を満たせない急コーナーで毎回
+                                     # タイムアウトまで全開加速し、+15km/h ほど乗せた状態で
+                                     # コーナーへ復帰していた (ADR-033)。
 
     # 速度・加速度はいずれも「車両側の上限まで出し切る」ことを狙った値。
     # override 経路には np.clip(acc, a_min, a_max) が掛からない (mpc_controller が
@@ -713,7 +812,7 @@ class RecoveryState(DrivingState):
 
         # forward_turn: 向きが整ったら即座に通常走行へ戻る
         if self._is_aligned(ctx) or phase_elapsed >= self.FORWARD_DURATION_TIME_SEC:
-            return "follow_path"
+            return self._exit(ctx, "follow_path", "aligned")
 
         return None
 
@@ -771,25 +870,6 @@ class FollowState(DrivingState):
     def on_enter(self, ctx: StateContext) -> None:
         self._enter_time = ctx.current_time_sec
 
-    def _exit(self, ctx: StateContext, next_state: str, reason: str) -> str:
-        """離脱理由を残してから遷移先を返す。
-
-        [StateManager] のログだけでは overtake -> follow_path が「本当に抜けた」のか
-        「見失った」のか区別できず、成功率が測定できないため。
-        """
-        if ctx.log_event is not None:
-            elapsed = (
-                ctx.current_time_sec - self._enter_time
-                if self._enter_time is not None else 0.0
-            )
-            ego_v = "None" if ctx.velocity is None else ctx.velocity * 3.6
-            forward_v = "None" if ctx.forward_vehicle_speed is None else ctx.forward_vehicle_distance * 3.6
-            distance = "None" if ctx.forward_vehicle_distance is None else ctx.forward_vehicle_distance
-            overtake_side = "left" if ctx.overtake_width_left >= ctx.overtake_width_right else "right"
-            overtake_width = "None" if ctx.min_forward_overtake_width is None else ctx.min_forward_overtake_width
-            overtake_offset = "None" if ctx.target_overtake_offset is None else ctx.target_overtake_offset
-            ctx.log_event(f"[Follow] exit reason={reason} to={next_state} elapsed={elapsed:.2f}s | ego_v={ego_v} forward_v={forward_v} gap={distance} overtake_side={overtake_side}, overtake_width={overtake_width} overtake_offset={overtake_offset}")
-        return next_state
 
     def check_transition(self, ctx: StateContext) -> Optional[str]:
 
@@ -798,7 +878,7 @@ class FollowState(DrivingState):
         ##########################################
 
         if ctx.is_colliding:
-            return self._exit(ctx, "recovery", "colliding")
+            return self._exit(ctx, "recovery", "collision")
 
 
         ##########################################
@@ -817,7 +897,7 @@ class FollowState(DrivingState):
             elapsed_clear = ctx.current_time_sec - self._clear_start_time
             if elapsed_clear >= FOLLOW_CLEAR_HYSTERESIS_SEC:
                 self._clear_start_time = None
-                return self._exit(ctx, "follow_path", "no surrounding vehicle")
+                return self._exit(ctx, "follow_path", "no_surrounding_vehicle")
         else:
             self._clear_start_time = None  # Instantly reset timer if vehicle is detected
 
@@ -904,6 +984,26 @@ class FollowState(DrivingState):
             has_future_width = (
                 ctx.overtake_width_right + width_shift >= MIN_OVERTAKE_WIDTH_M)
 
+        # --- T 秒後に幅が大きい側へ仕掛ける ------------------------------------
+        # 上の has_future_width は「現在の幅から先行車の横移動分を引く」近似で、
+        # コーナーで wp.ub / wp.lb (コース幅) 自体が変わる効果を拾えない。
+        # 実測ではその変化が幅縮小 0.95 m/s の支配要因だった。ここでは先行車の
+        # 予測位置でコリドーを引き直した将来幅を直接使う (ADR-032)。
+        future_side = ("left" if ctx.overtake_width_left_future >= ctx.overtake_width_right_future
+                       else "right")
+        future_w = overtake_width_future_of(ctx, future_side)
+        now_w = overtake_width_of(ctx, future_side)
+
+        if (
+            future_w >= MIN_OVERTAKE_WIDTH_M          # T 秒後も幅が残る
+            and now_w >= MIN_OVERTAKE_WIDTH_M         # 今も入れる
+            and ctx.min_forward_overtake_width >= MIN_OVERTAKE_WIDTH_M
+            and speed_diff >= OVERTAKE_CORNER_SPEED_MARGIN_MPS
+            and not ctx.has_left_side_vehicle
+            and not ctx.has_right_side_vehicle
+        ):
+            return self._exit(ctx, "overtake", "future_width_overtake")
+
         # ここにコーナーなどで積極的に追い越しを試行する条件を書く
         # 参照経路は traj_mincurv (最小曲率ライン) なので、空き幅は構造的に外側へ偏る
         # (コーナーの約 72%)。外側は弧長が長く同じ速度では抜けないため、
@@ -926,19 +1026,22 @@ class FollowState(DrivingState):
         if (
             is_corner
             and inside_width >= MIN_OVERTAKE_WIDTH_M
+            # 他の前方車で塞がっていないか。この枝だけ最近傍 1 台のコリドーしか
+            # 見ておらず、実走ログで 5 件が奥の車に塞がれたまま突入していた。
+            and ctx.min_forward_overtake_width >= MIN_OVERTAKE_WIDTH_M
             and is_near_corner
             and has_corner_speed_margin
             and not ctx.has_left_side_vehicle
             and not ctx.has_right_side_vehicle
         ):
-            return self._exit(ctx, "overtake", "corner overtake")
+            return self._exit(ctx, "overtake", "corner_overtake")
 
         # 先行車両が停止時に追い越し
         if (
             lead_speed < 1.0 / 3.6
             and ctx.min_forward_overtake_width >= MIN_OVERTAKE_WIDTH_M
         ):
-            return self._exit(ctx, "overtake", "forward vehicle stopping")
+            return self._exit(ctx, "overtake", "forward_vehicle_stop")
 
         # 安全な追い越し条件
         if (
@@ -948,10 +1051,10 @@ class FollowState(DrivingState):
             and is_slow_leader
             and is_ttc_close
             and has_future_width
-            and is_same_lane
+            # and is_same_lane # shift waypoint pure pursuit
             # and has_long_gap
         ):
-            return self._exit(ctx, "overtake", "safe overtake")
+            return self._exit(ctx, "overtake", "safe_width")
 
         ##########################################
         # follow -> recovery
@@ -1065,16 +1168,18 @@ class OvertakeState(DrivingState):
         if ctx.publish_boost is not None:
             ctx.publish_boost(1.5)
 
+        # 実際に寄せる側をラッチする。中断判定はこの側の幅だけを見る。
+        # max(left, right) で見ていると、内側が塞がっても外側が広ければ中断が効かず、
+        # 塞がった側へ突っ込み続ける (ADR-031 の実走ログで確認)。
+        self._overtake_side = resolve_overtake_side(ctx)
+
         # ReferencePath から計算された空き領域の真ん中を通る動的オフセットを採用
         if abs(ctx.target_overtake_offset) > 0.1:
             self._calculated_offset = ctx.target_overtake_offset
-            self._overtake_side = "left" if ctx.target_overtake_offset > 0 else "right"
         elif ctx.overtake_width_left >= ctx.overtake_width_right:
-            self._overtake_side = "left"
             half_w = ctx.overtake_width_left / 2.0
             self._calculated_offset = float(np.clip(half_w, 1.2, 2.2))
         else:
-            self._overtake_side = "right"
             half_w = ctx.overtake_width_right / 2.0
             self._calculated_offset = -float(np.clip(half_w, 1.2, 2.2))
 
@@ -1088,6 +1193,10 @@ class OvertakeState(DrivingState):
         #----------------------------------
         if ctx.publish_boost is not None:
             ctx.publish_boost(0.0)
+
+    def _log_side(self, ctx: StateContext) -> str:
+        """突入時にラッチした側。追い越し中は側が固定されるため。"""
+        return self._overtake_side
 
     def _update_passed(self, ctx: StateContext) -> bool:
         """前車が自車より後ろに出たか。一度 True になったらラッチする。"""
@@ -1121,25 +1230,6 @@ class OvertakeState(DrivingState):
             return False
         return (ctx.current_time_sec - self._enter_time) < OVERTAKE_COMMIT_SEC
 
-    def _exit(self, ctx: StateContext, next_state: str, reason: str) -> str:
-        """離脱理由を残してから遷移先を返す。
-
-        [StateManager] のログだけでは overtake -> follow_path が「本当に抜けた」のか
-        「見失った」のか区別できず、成功率が測定できないため。
-        """
-        if ctx.log_event is not None:
-            elapsed = (
-                ctx.current_time_sec - self._enter_time
-                if self._enter_time is not None else 0.0
-            )
-            ego_v = "None" if ctx.velocity is None else ctx.velocity * 3.6
-            forward_v = "None" if ctx.forward_vehicle_speed is None else ctx.forward_vehicle_distance * 3.6
-            distance = "None" if ctx.forward_vehicle_distance is None else ctx.forward_vehicle_distance
-            overtake_side = "left" if ctx.overtake_width_left >= ctx.overtake_width_right else "right"
-            overtake_width = "None" if ctx.min_forward_overtake_width is None else ctx.min_forward_overtake_width
-            overtake_offset = "None" if ctx.target_overtake_offset is None else ctx.target_overtake_offset
-            ctx.log_event(f"[Overtake] exit reason={reason} to={next_state} elapsed={elapsed:.2f}s | ego_v={ego_v} forward_v={forward_v} gap={distance} overtake_side={overtake_side}, overtake_width={overtake_width} overtake_offset={overtake_offset}")
-        return next_state
 
     def check_transition(self, ctx: StateContext) -> Optional[str]:
 
@@ -1169,8 +1259,20 @@ class OvertakeState(DrivingState):
             and ctx.forward_vehicle_distance < FORWARD_VEHICLE_DETECTION
         )
         if has_v2x_leader:
-            max_side = max(ctx.overtake_width_left, ctx.overtake_width_right)
-            if max_side < MIN_OVERTAKE_WIDTH_M and not self._is_committed(ctx):
+            # 実際に寄せている側の幅だけを見る。突入 (MIN_OVERTAKE_WIDTH_M) より
+            # 低い OVERTAKE_ABORT_WIDTH_M で判定し、ノイズでの往復を防ぐ。
+            side_w = overtake_width_of(ctx, self._overtake_side)
+
+            # ハード中断: 幅が崩壊したらコミット期間を無視して即座に引き返す。
+            # コミット期間は「シフトしかけの一瞬の幅不足で引き返さない」ためのもので、
+            # 「幅がもう無いと分かっている隙間へ突っ込み続ける」ためのものではない。
+            # 実測では中断の 66% がコミット明け直後に発火し、その時点の幅の 17% は
+            # 1.0m 未満だった。幅は 0.95 m/s で縮むので、突入 2.83m なら約 0.66 秒で
+            # 中断閾値を割る。残り 0.84 秒 (約 8m) を突っ込み続けていた (ADR-032)。
+            if side_w < OVERTAKE_HARD_ABORT_WIDTH_M:
+                return self._exit(ctx, "follow", "hard_narrow")
+
+            if side_w < OVERTAKE_ABORT_WIDTH_M and not self._is_committed(ctx):
                 return self._exit(ctx, "follow", "narrow")
 
 
