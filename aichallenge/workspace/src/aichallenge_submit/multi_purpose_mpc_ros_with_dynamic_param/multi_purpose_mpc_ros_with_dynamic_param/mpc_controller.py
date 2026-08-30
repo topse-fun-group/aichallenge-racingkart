@@ -231,6 +231,7 @@ class MPCController(Node):
             "forward_cone_deg": ("FORWARD_CONE_DEG", float(states.FORWARD_CONE_DEG)),
             "forward_lateral_max": ("FORWARD_LATERAL_MAX", float(states.FORWARD_LATERAL_MAX)),
             "follow_lateral_clear_m": ("FOLLOW_LATERAL_CLEAR_M", float(states.FOLLOW_LATERAL_CLEAR_M)),
+            "follow_lateral_blend_m": ("FOLLOW_LATERAL_BLEND_M", float(states.FOLLOW_LATERAL_BLEND_M)),
             "forward_vehicle_detection": ("FORWARD_VEHICLE_DETECTION", float(states.FORWARD_VEHICLE_DETECTION)),
             "side_vehicle_angle_min_deg": ("SIDE_VEHICLE_ANGLE_MIN_DEG", float(states.SIDE_VEHICLE_ANGLE_MIN_DEG)),
             "side_vehicle_angle_max_deg": ("SIDE_VEHICLE_ANGLE_MAX_DEG", float(states.SIDE_VEHICLE_ANGLE_MAX_DEG)),
@@ -747,7 +748,15 @@ class MPCController(Node):
             wps = self._reference_path.waypoints
             n_wps = len(wps)
 
-            lookahead_distance = lookahead_gain * target_speed_mps + lookahead_min
+            # 先読み距離は**実速度**基準にする (ADR-045)。従来は target_speed_mps
+            # (35km/h 固定) を使っており、停止車の後ろを 5km/h で這っているときも
+            # 6.22m 先を見ていた。Pure Pursuit の横ずれは y*d^2/L^2 なので、L が
+            # 長いと近傍でほとんど曲がらない。実測では 1.5m 前の停止車に対し
+            # 横ずれ 0.15m しか出ず、4m 空いているのに避けられず押し続けていた。
+            #   5km/h -> 3.72m (従来 6.22m) / 25km/h -> 5.38m / 35km/h -> 6.22m
+            # レース速度では従来とほぼ同じで、低速でだけ短くなる。
+            # 返す target_speed_mps は変更しない (縦方向は _control 側が上書きする)。
+            lookahead_distance = lookahead_gain * max(0.0, float(v_current)) + lookahead_min
             rear_x = pose.x - (wheel_base / 2.0) * np.cos(pose.theta)
             rear_y = pose.y - (wheel_base / 2.0) * np.sin(pose.theta)
 

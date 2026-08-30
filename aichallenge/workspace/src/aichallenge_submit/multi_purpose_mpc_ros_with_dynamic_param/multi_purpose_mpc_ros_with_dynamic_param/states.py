@@ -51,6 +51,12 @@ FORWARD_LATERAL_MAX        = 3.5   # [m] 前方検知の横方向ゲート (追�
 # 追い越しで横に出た先 (実測 1.86m) の相手にも全制動を掛けてしまう。接触するのは
 # 車幅 1.45m (自車半幅 0.725 + 相手半幅 0.725) 未満なので、そこに余裕を足した値。
 FOLLOW_LATERAL_CLEAR_M     = 1.7   # [m] これ以上横に離れていれば追従対象にしない
+# 解除を段差にすると、境界の直下 17.5km/h / 直上 35.0km/h と 17.5km/h 跳ぶ。
+# acc = KP*(u[0]-v) は KP=100 で実質バンバン制御なので、V2X の横位置ノイズが
+# 境界を跨ぐたびに全制動と全開を往復し、抜き際の挙動が乱れる (ADR-046)。
+# 帯はゲートの下側 [CLEAR - BLEND, CLEAR] に置く。接触幅 1.45m を挟む形になり、
+# ADR-043 が直した本番ケース (横 1.86m) は完全解除のまま保たれる。
+FOLLOW_LATERAL_BLEND_M     = 0.3   # [m] 解除の遷移帯
 FORWARD_VEHICLE_DETECTION  = 10.0  # [m] 前方検知距離
 SIDE_VEHICLE_ANGLE_MIN_DEG = 45.0  # [deg] 横最小検知角度
 SIDE_VEHICLE_ANGLE_MAX_DEG = 90.0  # [deg] 横最大検知角度
@@ -1257,9 +1263,22 @@ class FollowState(DrivingState):
         # 減速の判断に使うと「横に 1.86m 空けて抜き終えた相手」にまで
         # 車間 PD が働き、24.9km/h から停止 -> stuck -> recovery に落ちる。
         # 本番 (v1.3.5) の rosbag で実際にこれが起きていた。
-        if (ctx.forward_vehicle_lateral is not None
-                and abs(ctx.forward_vehicle_lateral) >= FOLLOW_LATERAL_CLEAR_M):
-            return VEHICLE_V_MAX / 3.6
+        # 解除は段差ではなく FOLLOW_LATERAL_BLEND_M の帯で滑らかに行う (ADR-046)。
+        # 段差のままだと境界の直下 17.5km/h / 直上 35.0km/h と 17.5km/h 跳び、
+        # V2X の横位置ノイズが境界を跨ぐたびに acc = KP*(u[0]-v) (KP=100 で実質
+        # バンバン制御) が全制動と全開を往復して、抜き際の挙動が乱れる。
+        v_free = VEHICLE_V_MAX / 3.6
+        release = 0.0
+        if ctx.forward_vehicle_lateral is not None:
+            # 帯はゲートの**下側** [CLEAR - BLEND, CLEAR]。こうすると ADR-043 が
+            # 直した本番ケース (横 1.86m) は従来どおり完全解除のまま保たれ、
+            # 物理的な接触幅 1.45m を挟む形で段差だけが消える。
+            release = float(np.clip(
+                (abs(ctx.forward_vehicle_lateral)
+                 - (FOLLOW_LATERAL_CLEAR_M - FOLLOW_LATERAL_BLEND_M))
+                / max(FOLLOW_LATERAL_BLEND_M, 1e-6), 0.0, 1.0))
+            if release >= 1.0:
+                return v_free
 
         v_ego = ctx.velocity
         v_lead = ctx.forward_vehicle_speed
@@ -1294,8 +1313,10 @@ class FollowState(DrivingState):
             + FOLLOW_K_GAP * (gap - d_des)
             + FOLLOW_K_V * (v_lead - v_ego)
         )
+        v_cmd = float(np.clip(v_cmd, 0.0, v_free))
 
-        return float(np.clip(v_cmd, 0.0, (VEHICLE_V_MAX / 3.6)))
+        # 横方向の解除ぶんだけ自由速度へ寄せる (release=0 で従来どおり PD のまま)。
+        return float(v_cmd + release * (v_free - v_cmd))
 
 
 class OvertakeState(DrivingState):
