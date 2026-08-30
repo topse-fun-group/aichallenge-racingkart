@@ -258,12 +258,29 @@ def resolve_overtake_side(ctx: StateContext) -> str:
     ADR-031 の「コーナーは弧長が短い内側」も撤回済み。参照経路が最小曲率ラインで
     既にインについているため内側には壁までの余地が無く、実測で内側 18% / 外側 31%
     (|kappa| 0.08-0.15) と逆効果だった (ADR-032)。
+
+    ただし採点の前に**物理的に入れない側は失格**にする (ADR-044)。
     """
     if abs(ctx.target_overtake_offset) <= 0.1:
         return "none"          # 前方にも側方にも車がいない
+
+    # 片側だけが車幅を確保できるなら、将来幅の採点に関係なくそちらを選ぶ。
+    # predict_overtake_widths は max(0.0, ...) で飽和するので、広い側の将来幅が
+    # 0 に潰れると狭い側が勝ってしまう。本番ログでは side_w=0.98m (車幅 1.45m 未満)
+    # の左を選び、右に 2.61m 空いているのに壁へ寄せて hard_narrow で終わっていた。
+    floor = OVERTAKE_HARD_ABORT_WIDTH_M   # ここを割れば入った瞬間に中断する幅
+    left_ok = ctx.overtake_width_left >= floor
+    right_ok = ctx.overtake_width_right >= floor
+    if left_ok != right_ok:
+        return "left" if left_ok else "right"
+
     left_w = min(ctx.overtake_width_left, ctx.overtake_width_left_future)
     right_w = min(ctx.overtake_width_right, ctx.overtake_width_right_future)
-    return "left" if left_w >= right_w else "right"
+    if left_w == right_w:
+        # 将来幅が両側とも 0 に潰れると同点になり、`>=` で常に左が選ばれていた
+        # (実測で「狭い側へ寄せる」ケースの大半が左)。同点なら現在幅で決める。
+        return "left" if ctx.overtake_width_left >= ctx.overtake_width_right else "right"
+    return "left" if left_w > right_w else "right"
 
 
 def predict_overtake_widths(left: float, right: float,
@@ -764,10 +781,15 @@ class RecoveryState(DrivingState):
 
     操舵
     ----
-    どちらのフェーズも**目標姿勢との角度差の分だけ舵を切る**
-    (``delta = ±RECOVERY_STEER_K * (e_psi - target)``、``±RECOVERY_STEER_LOCK_RAD``
-    でクリップ)。自転車モデルの ``psi_dot = (v/L) * tan(delta)`` より角度差を減らす
-    舵角の符号は進行方向で反転するので、後退では ``+``、前進では ``-`` を取る。
+    **向きは突入時の停止側で固定し、大きさだけを目標姿勢との角度差に比例させる。**
+
+    - センターラインの**左**で停止 → 後退は左に切り (``delta > 0``)、前進は右 (``delta < 0``)
+    - センターラインの**右**で停止 → 後退は右に切り (``delta < 0``)、前進は左 (``delta > 0``)
+
+    これは破ってはいけない契約。以前は符号もゲイン項に任せていたが、既に目標を
+    越えて刺さっているとき (``e_y > 0`` で ``e_psi < -40deg``) に符号が反転していた。
+    自転車モデル ``psi_dot = (v/L) * tan(delta)`` より、同じ向きに機首を回すには
+    後退と前進で舵角の符号が反転するので、前進側は裏返す。
 
     目標姿勢 ``target`` は 0 (経路と平行) ではなく、**停止位置から見てセンターラインを
     またぐ向き** ``-sign(path_e_y) * RECOVERY_CROSS_ANGLE_DEG``。平行を目標にすると
@@ -828,6 +850,7 @@ class RecoveryState(DrivingState):
         self._enter_time: Optional[float] = None
         self._phase_start_time: float = 0.0           # 現フェーズの開始時刻 [s]
         self._cross_sign: float = -1.0                # 目標とする e_psi の符号
+        self._steer_sign: float = 1.0                 # 後退時に切る向き (左が正)
 
     @property
     def name(self) -> str:
@@ -859,6 +882,10 @@ class RecoveryState(DrivingState):
         # path_e_y > 0 (経路の左にいる) なら e_psi < 0 (右を向く) を狙う。
         # 突入時に確定させ、復帰中に e_y の符号が変わっても目標は動かさない。
         self._cross_sign = -1.0 if ctx.path_e_y >= 0.0 else 1.0
+        # 舵角の向きも突入時の停止側で確定させる (ADR-044)。
+        #   左で停止 (path_e_y >= 0) -> 後退は左に切る (+)、前進は右に切る (-)
+        #   右で停止 (path_e_y <  0) -> 後退は右に切る (-)、前進は左に切る (+)
+        self._steer_sign = -self._cross_sign
         # 衝突を検知した tick から後退を始める。停止待機フェーズを挟むと
         # (0,0,0) + GEAR_DRIVE が 1 tick 漏れる (クラス docstring 参照)。
         self._enter_phase("back", ctx)
@@ -940,21 +967,24 @@ class RecoveryState(DrivingState):
     def compute_control_override(
         self, ctx: StateContext
     ) -> Optional[Tuple[float, float, float]]:
-        # 目標姿勢との角度差の分だけ舵を切る。自転車モデルの psi_dot = (v/L)*tan(delta)
-        # より、角度差を減らす舵角の符号は進行方向で反転する。
-        #   後退 (v < 0): delta と同符号   -> +K * err
-        #   前進 (v > 0): delta と逆符号   -> -K * err
-        # 目標は 0 ではなくまたぐ向きなので、経路と平行に刺さった (e_psi ~ 0、e_y ~ 0)
-        # ときも舵角は K * CROSS_ANGLE 残り、まっすぐ後退して元に戻ることがない。
+        # 舵角の**向き**は突入時の停止側で固定し、**大きさ**だけを目標姿勢との
+        # 角度差に比例させる (ADR-044)。
+        #
+        # 以前は符号もゲイン項に任せていた (`+K * err`) が、既に目標を越えて
+        # 刺さっているとき (e_y > 0 で e_psi < -40 度) に err が負になり、
+        # 「左で停止したのに後退で右に切る」という契約違反が起きていた。
+        # 自転車モデル psi_dot = (v/L)*tan(delta) より、同じ向きに機首を回すには
+        # 後退と前進で舵角の符号が反転するので、前進側は符号を裏返す。
         err = self._heading_error(ctx) - self._target_heading()
         lock = self.RECOVERY_STEER_LOCK_RAD
+        mag = min(abs(RECOVERY_STEER_K * err) + 0.3 * abs(ctx.path_e_y), lock)
 
         if self._phase == "back":
-            steer_cmd = float(np.clip(RECOVERY_STEER_K * err + 0.3 * ctx.path_e_y, -lock, lock))
+            steer_cmd = float(self._steer_sign * mag)
             return (self.RECOVERY_BACK_TURN_SPEED_MPS, steer_cmd, self.RECOVERY_BACK_ACCEL_MPSS)
 
         # phase == "forward_turn" (前進旋回)
-        steer_cmd = float(np.clip(-RECOVERY_STEER_K * err - 0.3 * ctx.path_e_y, -lock, lock))
+        steer_cmd = float(-self._steer_sign * mag)
         return (self.RECOVERY_FORWARD_TURN_SPEED_MPS, steer_cmd, self.RECOVERY_FORWARD_ACCEL_MPSS)
 
 
