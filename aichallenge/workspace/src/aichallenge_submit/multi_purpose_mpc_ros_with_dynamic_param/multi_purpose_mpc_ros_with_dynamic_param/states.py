@@ -107,13 +107,22 @@ OVERTAKE_PREDICT_LAT_ACCEL_MPSS  = 0.6   # [m/s^2] 先行車の横方向加速�
 OVERTAKE_ABORT_WIDTH_M           = 2.3   # [m] 寄せ側がこれを下回ったら中断
                                          #     突入は MIN_OVERTAKE_WIDTH_M (2.6) で、
                                          #     二段閾値にしてノイズでの往復を防ぐ
+OVERTAKE_CORNER_WIDTH_MARGIN_M   = 0.6   # [m] コーナーで突入に上乗せする幅。
+                                         # 幅の縮小速度は実測 0.95m/s あり、突入時に
+                                         # ぎりぎりだとコーナーを抜ける前に閉じる
+                                         # (|k| 0.05-0.10 は 15 件中 10 件が narrow 中断)
 
 # ---------------------------------------------------------------------------
 # recovery state parameter
 # ---------------------------------------------------------------------------
-RECOVERY_ALIGNED_HEADING_DEG = 5.0  # [deg] 復帰完了とみなす経路との角度差
-RECOVERY_ALIGNED_E_Y_M       = 0.5   # [m]   復帰完了とみなすセンターラインからの距離
-RECOVERY_STEER_K             = 1.8   # [-]   経路との角度差 → 舵角のゲイン
+# 復帰の目標姿勢は「経路と平行 (角度差 0)」ではなく「停止位置から見てセンターラインを
+# またぐ向き」。平行を目標にすると e_psi ~ 0 で刺さったときに舵角が消え、まっすぐ
+# 後退・前進して元の位置と姿勢に戻ってしまう (最後の直線で頻発した)。
+RECOVERY_CROSS_ANGLE_DEG     = 30.0  # [deg] またぐ向きの目標角。e_y > 0 なら -30度を狙う
+RECOVERY_MIN_PHASE_SEC       = 0.5   # [s]   交差が成立していても各フェーズは最低これだけ
+                                     #       動く。刺さった時点で既に交差していると
+                                     #       1 tick も動かずに復帰を抜けてしまうため
+RECOVERY_STEER_K             = 1.8   # [-]   目標姿勢との角度差 → 舵角のゲイン
                                      #       1.0 = ずれた角度分そのまま切る
 RECOVERY_BOOST_VALUE         = 0.0   # [-]   復帰後の boost 値 (OvertakeState と同値)
 RECOVERY_BOOST_DURATION_SEC  = 2.0   # [s]   復帰後に boost を維持する時間
@@ -686,12 +695,16 @@ class RecoveryState(DrivingState):
 
     操舵
     ----
-    どちらのフェーズも**経路からずれた角度分だけ舵を切る**
-    (``delta = ±RECOVERY_STEER_K * e_psi``、``±RECOVERY_STEER_LOCK_RAD`` でクリップ)。
-    自転車モデルの ``psi_dot = (v/L) * tan(delta)`` より e_psi を減らす舵角の符号は
-    進行方向で反転するので、後退では ``+``、前進では ``-`` を取る。
-    後退中は角度を消す過程で ``e_y`` も自然に減る (``y_dot ~ v * sin(e_psi)``)。
-    経路と平行に刺さった (``e_psi ~ 0``) ときは舵角も 0 になり、まっすぐ後退する。
+    どちらのフェーズも**目標姿勢との角度差の分だけ舵を切る**
+    (``delta = ±RECOVERY_STEER_K * (e_psi - target)``、``±RECOVERY_STEER_LOCK_RAD``
+    でクリップ)。自転車モデルの ``psi_dot = (v/L) * tan(delta)`` より角度差を減らす
+    舵角の符号は進行方向で反転するので、後退では ``+``、前進では ``-`` を取る。
+
+    目標姿勢 ``target`` は 0 (経路と平行) ではなく、**停止位置から見てセンターラインを
+    またぐ向き** ``-sign(path_e_y) * RECOVERY_CROSS_ANGLE_DEG``。平行を目標にすると
+    経路と平行に刺さった (``e_psi ~ 0``、``e_y ~ 0``) ときに舵角が 0 になり、
+    まっすぐ後退・前進して元の位置と姿勢に戻ってしまう。またぐ向きを狙えば
+    その状況でも舵角が ``K * CROSS_ANGLE`` 残る。
 
     ``on_enter`` が直接 ``back`` に入るため、**衝突を検知した tick から後退指令と
     ギア REVERSE が出る**。停止待機フェーズを挟むと、StateManager が遷移した tick では
@@ -700,9 +713,10 @@ class RecoveryState(DrivingState):
 
     早期離脱
     --------
-    ``back`` / ``forward_turn`` はいずれも「経路と平行 (角度差 < ``RECOVERY_ALIGNED_HEADING_DEG``)
-    かつセンターライン近傍 (|e_y| < ``RECOVERY_ALIGNED_E_Y_M``)」が成立した時点で
-    次へ進む。姿勢がほとんど崩れていない軽い接触なら数 tick で ``follow_path`` に戻る。
+    ``back`` / ``forward_turn`` はいずれも目標のまたぐ向きに達した
+    (``e_psi * cross_sign >= RECOVERY_CROSS_ANGLE_DEG``) 時点で次へ進む。
+    ただし ``RECOVERY_MIN_PHASE_SEC`` の間は離脱しない。刺さった時点で既に
+    またぐ向きだと、1 tick も動かずに復帰を抜けて再び stuck するため。
     各フェーズの時間はフェーズ開始からで測るので、``back`` を早く抜けても
     ``forward_turn`` の持ち時間は変わらない。
 
@@ -727,12 +741,13 @@ class RecoveryState(DrivingState):
     RECOVERY_FORWARD_ACCEL_MPSS = 3.0  # [m/s^2] USE_BUG_ACC と同値
     RECOVERY_BACK_ACCEL_MPSS = 3.0     # [m/s^2] (override 側で abs() を取る)
 
-    RECOVERY_STEER_LOCK_RAD = 1.48     # [rad] 大舵角ステアリング角度
+    RECOVERY_STEER_LOCK_RAD = 1.55     # [rad] 大舵角ステアリング角度 default 1.48
 
     def __init__(self) -> None:
         self._phase: str = "back"                     # "back" | "forward_turn"
         self._enter_time: Optional[float] = None
         self._phase_start_time: float = 0.0           # 現フェーズの開始時刻 [s]
+        self._cross_sign: float = -1.0                # 目標とする e_psi の符号
 
     @property
     def name(self) -> str:
@@ -760,6 +775,10 @@ class RecoveryState(DrivingState):
 
     def on_enter(self, ctx: StateContext) -> None:
         self._enter_time = ctx.current_time_sec
+        # 停止位置から見てセンターラインをまたぐ向きを目標にする。
+        # path_e_y > 0 (経路の左にいる) なら e_psi < 0 (右を向く) を狙う。
+        # 突入時に確定させ、復帰中に e_y の符号が変わっても目標は動かさない。
+        self._cross_sign = -1.0 if ctx.path_e_y >= 0.0 else 1.0
         # 衝突を検知した tick から後退を始める。停止待機フェーズを挟むと
         # (0,0,0) + GEAR_DRIVE が 1 tick 漏れる (クラス docstring 参照)。
         self._enter_phase("back", ctx)
@@ -782,14 +801,24 @@ class RecoveryState(DrivingState):
         """経路方位に対する自車 heading のずれ [rad]。左が正、[-pi, pi) に正規化。"""
         return (ctx.pose_theta - ctx.path_psi + np.pi) % (2 * np.pi) - np.pi
 
-    def _is_aligned(self, ctx: StateContext) -> bool:
-        """経路と平行かつセンターライン近傍か（＝もう復帰動作は要らないか）。"""
+    def _target_heading(self) -> float:
+        """目標姿勢 [rad]。停止位置から見てセンターラインをまたぐ向き。"""
+        return self._cross_sign * np.deg2rad(RECOVERY_CROSS_ANGLE_DEG)
+
+    def _has_crossed(self, ctx: StateContext) -> bool:
+        """またぐ向きに達したか（＝もう復帰動作は要らないか）。"""
         # ctx.path_deviation は _build_state_context で代入されておらず常に 0.0 なので
-        # 使わない。横偏差は path_e_y、角度差は pose_theta と path_psi から出す。
-        return (
-            abs(self._heading_error(ctx)) < np.deg2rad(RECOVERY_ALIGNED_HEADING_DEG)
-            and abs(ctx.path_e_y) < RECOVERY_ALIGNED_E_Y_M
-        )
+        # 使わない。角度差は pose_theta と path_psi から出す。
+        return (self._heading_error(ctx) * self._cross_sign
+                >= np.deg2rad(RECOVERY_CROSS_ANGLE_DEG))
+
+    def _phase_done(self, ctx: StateContext, phase_elapsed: float) -> bool:
+        """フェーズを切り上げてよいか。
+
+        最低 RECOVERY_MIN_PHASE_SEC は動かす。刺さった時点で既にまたぐ向きだと、
+        1 tick も後退せずに復帰を抜けて再び stuck するため。
+        """
+        return phase_elapsed >= RECOVERY_MIN_PHASE_SEC and self._has_crossed(ctx)
 
     def check_transition(self, ctx: StateContext) -> Optional[str]:
         if self._enter_time is None:
@@ -800,8 +829,9 @@ class RecoveryState(DrivingState):
         phase_elapsed = ctx.current_time_sec - self._phase_start_time
 
         if self._phase == "back":
-            # 向きが整ったら後退を打ち切って前進へ
-            if self._is_aligned(ctx) or phase_elapsed >= self.BACK_DURATION_TIME_SEC:
+            # またぐ向きに達したら後退を打ち切って前進へ
+            if (self._phase_done(ctx, phase_elapsed)
+                    or phase_elapsed >= self.BACK_DURATION_TIME_SEC):
                 self._enter_phase("forward_turn", ctx)
             return None
 
@@ -810,29 +840,31 @@ class RecoveryState(DrivingState):
         # recovery -> follow path
         ###################################################
 
-        # forward_turn: 向きが整ったら即座に通常走行へ戻る
-        if self._is_aligned(ctx) or phase_elapsed >= self.FORWARD_DURATION_TIME_SEC:
-            return self._exit(ctx, "follow_path", "aligned")
+        # forward_turn: またぐ向きに達したら即座に通常走行へ戻る
+        if (self._phase_done(ctx, phase_elapsed)
+                or phase_elapsed >= self.FORWARD_DURATION_TIME_SEC):
+            return self._exit(ctx, "follow_path", "crossed")
 
         return None
 
     def compute_control_override(
         self, ctx: StateContext
     ) -> Optional[Tuple[float, float, float]]:
-        # 経路からずれた角度分だけ舵を切る。自転車モデルの psi_dot = (v/L)*tan(delta)
-        # より、e_psi を減らす舵角の符号は進行方向で反転する。
-        #   後退 (v < 0): delta と同符号   -> +K * e_psi
-        #   前進 (v > 0): delta と逆符号   -> -K * e_psi
-        # 経路と平行に刺さった (e_psi ~ 0) ときは舵角も 0 になり、まっすぐ後退する。
-        e_psi = self._heading_error(ctx)
+        # 目標姿勢との角度差の分だけ舵を切る。自転車モデルの psi_dot = (v/L)*tan(delta)
+        # より、角度差を減らす舵角の符号は進行方向で反転する。
+        #   後退 (v < 0): delta と同符号   -> +K * err
+        #   前進 (v > 0): delta と逆符号   -> -K * err
+        # 目標は 0 ではなくまたぐ向きなので、経路と平行に刺さった (e_psi ~ 0、e_y ~ 0)
+        # ときも舵角は K * CROSS_ANGLE 残り、まっすぐ後退して元に戻ることがない。
+        err = self._heading_error(ctx) - self._target_heading()
         lock = self.RECOVERY_STEER_LOCK_RAD
 
         if self._phase == "back":
-            steer_cmd = float(np.clip(RECOVERY_STEER_K * e_psi + 0.3 * ctx.path_e_y, -lock, lock))
+            steer_cmd = float(np.clip(RECOVERY_STEER_K * err + 0.3 * ctx.path_e_y, -lock, lock))
             return (self.RECOVERY_BACK_TURN_SPEED_MPS, steer_cmd, self.RECOVERY_BACK_ACCEL_MPSS)
 
         # phase == "forward_turn" (前進旋回)
-        steer_cmd = float(np.clip(-RECOVERY_STEER_K * e_psi - 0.3 * ctx.path_e_y, -lock, lock))
+        steer_cmd = float(np.clip(-RECOVERY_STEER_K * err - 0.3 * ctx.path_e_y, -lock, lock))
         return (self.RECOVERY_FORWARD_TURN_SPEED_MPS, steer_cmd, self.RECOVERY_FORWARD_ACCEL_MPSS)
 
 
