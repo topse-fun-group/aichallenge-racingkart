@@ -46,7 +46,11 @@ STUCK_DURATION = 0.7            # [s] — stopped 8s triggers recovery (prevents
 # 周期で状態が往復し、そのたびに制御モードが Pure Pursuit ↔ MPC で切り替わって
 # 大きくふらつく。両方の検知器がこの同じ値を使うこと。
 FORWARD_CONE_DEG           = 45.0  # [deg] 前方検知角度
-FORWARD_LATERAL_MAX        = 3.5   # [m] 前方検知の横方向ゲート
+FORWARD_LATERAL_MAX        = 3.5   # [m] 前方検知の横方向ゲート (追い越し判断用に広く取る)
+# 追従して減速するかどうかの横方向ゲート。検知の 3.5m をそのまま減速に使うと、
+# 追い越しで横に出た先 (実測 1.86m) の相手にも全制動を掛けてしまう。接触するのは
+# 車幅 1.45m (自車半幅 0.725 + 相手半幅 0.725) 未満なので、そこに余裕を足した値。
+FOLLOW_LATERAL_CLEAR_M     = 1.7   # [m] これ以上横に離れていれば追従対象にしない
 FORWARD_VEHICLE_DETECTION  = 10.0  # [m] 前方検知距離
 SIDE_VEHICLE_ANGLE_MIN_DEG = 45.0  # [deg] 横最小検知角度
 SIDE_VEHICLE_ANGLE_MAX_DEG = 90.0  # [deg] 横最大検知角度
@@ -58,9 +62,9 @@ D0_M                        = 0.9   # [m] 追従時の停止目標車間距離 (
 TIME_HEADWAY_SEC            = 0.8  # [s] 追従時に車間距離を縮める期待時間 (default: 0.35)
 FORWARD_FOLLOW_DISTANCE_M   = 5.0   # [m] 追従を行う前方車両との車間距離 (default: 4.0)
 FOLLOW_CLEAR_HYSTERESIS_SEC = 1.0   # [s] 追従状態を維持する最低時間 (チャタリング防止)
-FOLLOW_STOP_DISTANCE_M      = 0.5   # [m] 完全停止・ブレーキ閾値。
-                                    # 目標車間 D0_M (0.9) との差が 0.1m しかないと
-                                    # 平衡点で全制動と解除を往復するので離してある。
+FOLLOW_STOP_DISTANCE_M      = 0.5   # [m] 追い越し復帰時の速度上限で残す安全余裕
+                                    # (overtake_return_speed_mps)。追従 PD 側の
+                                    # 全制動ルールは ADR-043 で撤回した。
 FOLLOW_K_GAP                = 1.4   # [1/s] ギャップ誤差 → 速度
 FOLLOW_K_V                  = 0.5   # [-] 相対速度ダンピング (default: 0.7)
 FOLLOW_MIN_SPEED_KMH        = 10.0  # [km/h] 最低追従速度
@@ -197,6 +201,7 @@ class StateContext:
     # --- V2X (Phase 2) ------------------------------------------------------
     forward_vehicle_distance: Optional[float] = None # [m]
     forward_vehicle_gap: float = 0.0                 # [m] bumper-to-bumper (distance - VEHICLE_LENGTH)
+    forward_vehicle_lateral: Optional[float] = None  # [m] 先行車の横偏差 (左が正)
     forward_vehicle_speed: Optional[float] = None    # [m/s]
     forward_vehicle_heading_diff: float = 0.0        # absolute heading diff relative to path_psi [rad]
     nearest_vehicle_s_rel: Optional[float] = None    # [m] signed; negative = behind ego
@@ -1217,6 +1222,15 @@ class FollowState(DrivingState):
         if ctx.forward_vehicle_distance is None or ctx.forward_vehicle_speed is None:
             return VEHICLE_V_MAX / 3.6
 
+        # 横に離れている相手は追従対象ではない (ADR-043)。前方検知の横ゲートは
+        # FORWARD_LATERAL_MAX = 3.5m と広く、追い越しの判断にはその広さが要るが、
+        # 減速の判断に使うと「横に 1.86m 空けて抜き終えた相手」にまで
+        # 車間 PD が働き、24.9km/h から停止 -> stuck -> recovery に落ちる。
+        # 本番 (v1.3.5) の rosbag で実際にこれが起きていた。
+        if (ctx.forward_vehicle_lateral is not None
+                and abs(ctx.forward_vehicle_lateral) >= FOLLOW_LATERAL_CLEAR_M):
+            return VEHICLE_V_MAX / 3.6
+
         v_ego = ctx.velocity
         v_lead = ctx.forward_vehicle_speed
 
@@ -1225,11 +1239,12 @@ class FollowState(DrivingState):
         # _build_state_context で代入されておらず常に 0.0 なので使わない。
         gap = max(0.0, ctx.forward_vehicle_distance - VEHICLE_LENGTH)
 
-        # 危険車間では全制動。FOLLOW_STOP_DISTANCE_M は定義済みだったが、側方車両の
-        # 分岐でしか使われておらず通常の追従経路には入っていなかった。ゲインからの
-        # 創発 (gap=0 でも v_cmd は v_lead - 1.3m/s 程度) では追突を止められない。
-        if gap <= FOLLOW_STOP_DISTANCE_M:
-            return 0.0
+        # NOTE: ここに `if gap <= FOLLOW_STOP_DISTANCE_M: return 0.0` を置いていたが
+        #       撤回した (ADR-043)。forward_vehicle_distance は横方向の離れを
+        #       考慮しないため、追い越しで横に出ていく途中に相手が前方コーン
+        #       (±45度) の端へ来た瞬間、横に 1.9m 空いていても距離 2.1m で発火し、
+        #       KP=100 の実質バンバン制御で全制動 -> 停止 -> stuck -> recovery に
+        #       落ちていた。復活させるなら横偏差を見る信号が要る。
 
         # 追い越せる幅があるうちは D0_M まで詰めて追い越しの助走を作る。
         # 幅が無いときは FOLLOW_TARGET_DISTANCE_M の安全車間を保つ。

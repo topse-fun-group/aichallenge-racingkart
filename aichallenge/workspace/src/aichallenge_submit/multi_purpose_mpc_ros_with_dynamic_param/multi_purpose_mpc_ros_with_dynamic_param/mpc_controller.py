@@ -230,6 +230,7 @@ class MPCController(Node):
             "stuck_duration": ("STUCK_DURATION", float(states.STUCK_DURATION)),
             "forward_cone_deg": ("FORWARD_CONE_DEG", float(states.FORWARD_CONE_DEG)),
             "forward_lateral_max": ("FORWARD_LATERAL_MAX", float(states.FORWARD_LATERAL_MAX)),
+            "follow_lateral_clear_m": ("FOLLOW_LATERAL_CLEAR_M", float(states.FOLLOW_LATERAL_CLEAR_M)),
             "forward_vehicle_detection": ("FORWARD_VEHICLE_DETECTION", float(states.FORWARD_VEHICLE_DETECTION)),
             "side_vehicle_angle_min_deg": ("SIDE_VEHICLE_ANGLE_MIN_DEG", float(states.SIDE_VEHICLE_ANGLE_MIN_DEG)),
             "side_vehicle_angle_max_deg": ("SIDE_VEHICLE_ANGLE_MAX_DEG", float(states.SIDE_VEHICLE_ANGLE_MAX_DEG)),
@@ -896,7 +897,7 @@ class MPCController(Node):
         self
     ) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[Tuple[float, float]], bool, Optional[float], Optional[float]]:
         """Return (fwd_dist, fwd_speed, fwd_heading, fwd_pos, has_side_vehicle, side_speed,
-        nearest_s_rel)."""
+        nearest_s_rel, fwd_lateral)."""
         # Forward criteria must match _scan_surrounding_vehicles exactly — see the
         # FORWARD_CONE_DEG comment in states.py for why.
         HALF_ANGLE = np.deg2rad(states.FORWARD_CONE_DEG)
@@ -906,6 +907,7 @@ class MPCController(Node):
         best_speed: Optional[float] = None
         best_heading: Optional[float] = None
         best_pos: Optional[Tuple[float, float]] = None
+        best_lat: Optional[float] = None   # 先行車の横偏差 [m] (左が正)
 
         has_side_vehicle = False
         side_vehicle_speed: Optional[float] = None
@@ -971,6 +973,7 @@ class MPCController(Node):
             if best_dist is None or s_rel < best_dist:
                 best_dist = s_rel
                 best_pos = (vx_pos, vy_pos)
+                best_lat = float(y_rel)
                 best_speed = v_speed
                 if best_speed > 0.3:
                     best_heading = float(np.arctan2(vy_vel, vx_vel))
@@ -983,7 +986,7 @@ class MPCController(Node):
         # If no vehicle directly ahead but a vehicle is alongside, use side vehicle pos for corridor calc
         target_corridor_pos = best_pos if best_pos is not None else side_vehicle_pos
         return (best_dist, best_speed, best_heading, target_corridor_pos,
-                has_side_vehicle, side_vehicle_speed, nearest_s_rel)
+                has_side_vehicle, side_vehicle_speed, nearest_s_rel, best_lat)
 
     def _compute_v2x_overtake_corridor(
         self, fwd_pos: Optional[Tuple[float, float]]
@@ -1171,6 +1174,7 @@ class MPCController(Node):
             has_side,
             side_speed,
             nearest_s_rel,
+            fwd_lateral,
         ) = self._detect_forward_and_side_vehicles()
         left_w, right_w, target_offset, leader_psi = self._compute_v2x_overtake_corridor(
             corridor_pos)
@@ -1259,6 +1263,7 @@ class MPCController(Node):
             path_kappa=path_kappa,
             in_tight_corner=in_tight_corner,
             forward_vehicle_distance=fwd_dist,
+            forward_vehicle_lateral=fwd_lateral,
             forward_vehicle_speed=fwd_speed,
             forward_vehicle_heading_diff=fwd_heading_diff,
             nearest_vehicle_s_rel=nearest_s_rel,

@@ -239,7 +239,7 @@ else:
 
 1. `forward_vehicle_gap` が常に 0.0 のままで `is_ttc_close` が恒真（ADR-027 から継続）。
 2. `has_future_width` の左右符号非対称（ADR-032 から継続）。
-3. V2X 速度が 2 点差分・無平滑（σ≈2.8 m/s、heading 換算で σ≈22°）。
+3. V2X 速度が 2 点差分・無平滑（σ≈2.8 m/s、heading 換算で σ≈22° (訂正: 実測は中央 1.3〜2.0°、ADR-042)）。
    `V2XVehicleTracker` のバッファが `maxlen=2` なので、平滑化するには先にそこを広げる。
 4. **実行時 waypoint の平滑化で、最小 R のコーナーの `|kappa|` が CSV の 0.39 に対し
    0.24 と 4 割過小評価される**（上限 19 km/h のところ 23 km/h を許す）。
