@@ -58,7 +58,9 @@ D0_M                        = 0.9   # [m] 追従時の停止目標車間距離 (
 TIME_HEADWAY_SEC            = 0.8  # [s] 追従時に車間距離を縮める期待時間 (default: 0.35)
 FORWARD_FOLLOW_DISTANCE_M   = 5.0   # [m] 追従を行う前方車両との車間距離 (default: 4.0)
 FOLLOW_CLEAR_HYSTERESIS_SEC = 1.0   # [s] 追従状態を維持する最低時間 (チャタリング防止)
-FOLLOW_STOP_DISTANCE_M      = 0.8   # [m] (完全停止・ブレーキ閾値、遅延を考慮)
+FOLLOW_STOP_DISTANCE_M      = 0.5   # [m] 完全停止・ブレーキ閾値。
+                                    # 目標車間 D0_M (0.9) との差が 0.1m しかないと
+                                    # 平衡点で全制動と解除を往復するので離してある。
 FOLLOW_K_GAP                = 1.4   # [1/s] ギャップ誤差 → 速度
 FOLLOW_K_V                  = 0.5   # [-] 相対速度ダンピング (default: 0.7)
 FOLLOW_MIN_SPEED_KMH        = 10.0  # [km/h] 最低追従速度
@@ -104,6 +106,11 @@ OVERTAKE_PREDICT_LAT_ACCEL_MPSS  = 0.6   # [m/s^2] 先行車の横方向加速�
                                          # 0.5*A*T^2 がコース幅 (半幅 約3m) を超えると
                                          # 片側の将来幅が必ず 0 に飽和し、寄せ側が
                                          # sign(heading_diff) だけで決まってしまう。
+# 追い越しを抜けた直後、ラインへ戻る間だけ掛ける速度上限。中断時の先行車は
+# 中心間 1.4〜4.3m 前におり (hard_narrow の 38% が 3m 未満)、横オフセットが
+# 一瞬で 0 に戻るため相手の車線へ切り返す形になる。落として抜けさせる。
+OVERTAKE_RETURN_SEC              = 1.0   # [s] 上限を掛ける時間
+OVERTAKE_RETURN_BRAKE_MPSS       = 2.0   # [m/s^2] 上限の逆算に使う実効制動力
 OVERTAKE_ABORT_WIDTH_M           = 2.3   # [m] 寄せ側がこれを下回ったら中断
                                          #     突入は MIN_OVERTAKE_WIDTH_M (2.6) で、
                                          #     二段閾値にしてノイズでの往復を防ぐ
@@ -293,6 +300,23 @@ def overtake_width_future_of(ctx: StateContext, side: str) -> float:
     return 0.0
 
 
+def overtake_return_speed_mps(distance_m: float, lead_speed_mps: float) -> float:
+    """追い越しを中断してラインへ戻る間の速度上限 [m/s]。
+
+    ``v <= v_lead + sqrt(2 a (gap - d_stop))`` を満たしていれば、先行車の速度まで
+    落としきってなお ``FOLLOW_STOP_DISTANCE_M`` が残る。車間が開いていれば上限は
+    車両上限を超えるので何も制限しない。中断時の中心間距離の中央値 (3.4〜4.3m) では
+    ほとんど効かず、危険な尾 (3m 未満、中断の 29〜38%) でだけ効く。
+
+    ADR-038 は同じ式を**追い越し中**に掛けて失敗した (先行車が減速すると上限も
+    崩れ、抜くべき場面で速度を合わせに行った)。ここは追い越しを抜けた後の
+    OVERTAKE_RETURN_SEC の間だけに限定する。
+    """
+    margin = max(0.0, (distance_m - VEHICLE_LENGTH) - FOLLOW_STOP_DISTANCE_M)
+    return max(0.0, lead_speed_mps) + float(
+        np.sqrt(2.0 * OVERTAKE_RETURN_BRAKE_MPSS * margin))
+
+
 def is_inside_corner_overtake(ctx: StateContext) -> bool:
     """コーナーの内側へ仕掛けようとしているか。
 
@@ -305,8 +329,18 @@ def is_inside_corner_overtake(ctx: StateContext) -> bool:
 
     直線では左右に内外の意味が無く (kappa の符号はノイズ)、実際 |kappa| < 0.05 の
     「内側」突入は 10 件中 9 件が成功しているので、コーナーに限って判定する。
+
+    停止・徐行している相手は例外 (ADR-039)。
     """
     if abs(ctx.path_kappa) <= OVERTAKE_CORNER_KAPPA:
+        return False
+
+    # 停止・徐行している相手の前では veto しない。veto の根拠は「コーナーが進むに
+    # つれて先行車の動きとコース形状で内側が閉じる」ことで、動いていない相手には
+    # 当てはまらない。本番ログ (naito_v1.3.4, ...6286959) では内側に 4.47m 空いた
+    # 停止車の後ろで stuck -> recovery を 10 回繰り返し、41.8s (走行の 8%) を失った。
+    lead = ctx.closest_forward_vehicle_speed
+    if lead is not None and lead < FOLLOW_LEADER_MOVING_MPS:
         return False
     side = resolve_overtake_side(ctx)
     if side == "none":
@@ -711,7 +745,6 @@ class FollowPathState(DrivingState):
                 ):
                     return self._exit(ctx, "overtake", "safe_width_with_enough_distance")
                 return self._exit(ctx, "follow", "not_safe_width_with_enough_distance")
-        #-------------------------- version 3 --------------------------
         return None
 
 
@@ -1192,8 +1225,16 @@ class FollowState(DrivingState):
         # _build_state_context で代入されておらず常に 0.0 なので使わない。
         gap = max(0.0, ctx.forward_vehicle_distance - VEHICLE_LENGTH)
 
+        # 危険車間では全制動。FOLLOW_STOP_DISTANCE_M は定義済みだったが、側方車両の
+        # 分岐でしか使われておらず通常の追従経路には入っていなかった。ゲインからの
+        # 創発 (gap=0 でも v_cmd は v_lead - 1.3m/s 程度) では追突を止められない。
+        if gap <= FOLLOW_STOP_DISTANCE_M:
+            return 0.0
+
         # 追い越せる幅があるうちは D0_M まで詰めて追い越しの助走を作る。
         # 幅が無いときは FOLLOW_TARGET_DISTANCE_M の安全車間を保つ。
+        # ADR-037 でここを速度依存 (D0_M + 0.25*v) にしたが、試行回数が
+        # 370 -> 226 件、成功件数が 139 -> 103 件と落ちたため撤回した (ADR-040)。
         d_des = (
             D0_M
             if ctx.min_forward_overtake_width >= MIN_OVERTAKE_WIDTH_M

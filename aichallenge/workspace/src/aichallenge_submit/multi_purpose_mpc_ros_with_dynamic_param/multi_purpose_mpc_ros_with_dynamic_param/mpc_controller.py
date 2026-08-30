@@ -260,6 +260,8 @@ class MPCController(Node):
             "overtake_corner_max_dist_m": ("OVERTAKE_CORNER_MAX_DIST_M", float(states.OVERTAKE_CORNER_MAX_DIST_M)),
             "overtake_corner_speed_margin_mps": ("OVERTAKE_CORNER_SPEED_MARGIN_MPS", float(states.OVERTAKE_CORNER_SPEED_MARGIN_MPS)),
             "overtake_commit_sec": ("OVERTAKE_COMMIT_SEC", float(states.OVERTAKE_COMMIT_SEC)),
+            "overtake_return_sec": ("OVERTAKE_RETURN_SEC", float(states.OVERTAKE_RETURN_SEC)),
+            "overtake_return_brake_mpss": ("OVERTAKE_RETURN_BRAKE_MPSS", float(states.OVERTAKE_RETURN_BRAKE_MPSS)),
             "overtake_abort_width_m": ("OVERTAKE_ABORT_WIDTH_M", float(states.OVERTAKE_ABORT_WIDTH_M)),
             "overtake_hard_abort_width_m": ("OVERTAKE_HARD_ABORT_WIDTH_M", float(states.OVERTAKE_HARD_ABORT_WIDTH_M)),
             "overtake_predict_horizon_sec": ("OVERTAKE_PREDICT_HORIZON_SEC", float(states.OVERTAKE_PREDICT_HORIZON_SEC)),
@@ -418,6 +420,7 @@ class MPCController(Node):
         self._has_ever_moved = False  # 一度でも走り出したか (グリッド待機の除外用)
         self._start_time = None
         self._last_recovery_exit_time = None
+        self._overtake_exit_time = None  # 追い越しを抜けた時刻 (復帰中の速度制限用)
 
         # --- Lateral shift side (寄せ側) hysteresis ---
         self._shift_side_filter = states.LateralShiftSideFilter()
@@ -1342,6 +1345,13 @@ class MPCController(Node):
 
             current_state = self._state_manager.current_state
 
+            # 追い越しを抜けた時刻。中断 (narrow / hard_narrow) では横オフセットが
+            # ±2.5m から 0 へ一瞬で戻る (OvertakeState だけが WAYPOINT_SHIFT で、
+            # follow / follow_path は素の Pure Pursuit) ため、まだ 1.4〜3.4m 前に
+            # いる先行車の車線へ切り返す形になる。復帰の間だけ速度を絞る。
+            if prev_state_name == "overtake" and self._state_manager.current_state_name != "overtake":
+                self._overtake_exit_time = (now.nanoseconds / 1e9)
+
             if prev_state_name == "recovery" and self._state_manager.current_state_name != "recovery":
                 self._last_recovery_exit_time = (now.nanoseconds / 1e9)
                 # 衝突ラッチ (2.5s) が残っていると follow_path / follow / overtake が
@@ -1430,6 +1440,20 @@ class MPCController(Node):
                 # 35 km/h 固定は AWSIM の drive-fade 平衡 (約 35.7 km/h) を下回るため、
                 # 追い越しに入った瞬間 acc = KP*(u[0]-v) が a_min (フルブレーキ) になっていた。
                 v_target = kmh_to_m_per_sec(states.OVERTAKE_TARGET_SPEED_KMH)
+
+            # 追い越しを抜けた直後、ラインへ戻る間だけ速度を絞る。オフセットが
+            # 一瞬で 0 に戻るので、まだ前にいる先行車の車線へ切り返す形になる。
+            # 中断時の中心間距離の中央値 (3.4〜4.3m) ではほぼ効かず、危険な尾
+            # (3m 未満、中断の 29〜38%) でだけ効く。OvertakeState 自体には
+            # 掛けない (ADR-038 の失敗: 抜くべき場面で速度を合わせに行った)。
+            if (self._overtake_exit_time is not None
+                    and not isinstance(current_state, states.OvertakeState)
+                    and (ctx.current_time_sec - self._overtake_exit_time)
+                        < states.OVERTAKE_RETURN_SEC
+                    and ctx.forward_vehicle_distance is not None
+                    and ctx.forward_vehicle_speed is not None):
+                v_target = min(v_target, states.overtake_return_speed_mps(
+                    ctx.forward_vehicle_distance, ctx.forward_vehicle_speed))
 
             # 回頭角 120 度未満のコーナーでは曲率から速度上限を掛ける。速度プロファイル
             # (reference_path.compute_speed_profile) と同じ v = sqrt(ay_max / |kappa|)。
