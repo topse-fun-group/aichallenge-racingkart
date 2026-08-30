@@ -54,7 +54,7 @@ SIDE_VEHICLE_ANGLE_MAX_DEG = 90.0  # [deg] 横最大検知角度
 # ---------------------------------------------------------------------------
 # follow state parameter
 # ---------------------------------------------------------------------------
-D0_M                        = 0.7   # [m] 追従時の停止目標車間距離 (default: 1.5)
+D0_M                        = 0.9   # [m] 追従時の停止目標車間距離 (default: 1.5)
 TIME_HEADWAY_SEC            = 0.8  # [s] 追従時に車間距離を縮める期待時間 (default: 0.35)
 FORWARD_FOLLOW_DISTANCE_M   = 5.0   # [m] 追従を行う前方車両との車間距離 (default: 4.0)
 FOLLOW_CLEAR_HYSTERESIS_SEC = 1.0   # [s] 追従状態を維持する最低時間 (チャタリング防止)
@@ -63,7 +63,7 @@ FOLLOW_K_GAP                = 1.4   # [1/s] ギャップ誤差 → 速度
 FOLLOW_K_V                  = 0.5   # [-] 相対速度ダンピング (default: 0.7)
 FOLLOW_MIN_SPEED_KMH        = 10.0  # [km/h] 最低追従速度
 FOLLOW_LEADER_MOVING_MPS    = 0.5   # [m/s] 0.5m/s = 1.8km/s
-FOLLOW_TARGET_DISTANCE_M    = 1.5
+FOLLOW_TARGET_DISTANCE_M    = 1.2
 
 # ---------------------------------------------------------------------------
 # overtake state parameter
@@ -293,6 +293,28 @@ def overtake_width_future_of(ctx: StateContext, side: str) -> float:
     return 0.0
 
 
+def is_inside_corner_overtake(ctx: StateContext) -> bool:
+    """コーナーの内側へ仕掛けようとしているか。
+
+    参照経路は traj_mincurv (最小曲率ライン) で既に内側を舐めているため、内側には
+    構造的に幅が無い。突入時は空いて見えても、コーナーが進むにつれて閉じる。
+    実測 (20260830-221428、|kappa| >= OVERTAKE_CORNER_KAPPA の突入 115 件):
+
+        内側  46 件  成功  3 (7%)   幅で中断 35 (76%)
+        外側  69 件  成功 16 (23%)  幅で中断 18 (26%)
+
+    直線では左右に内外の意味が無く (kappa の符号はノイズ)、実際 |kappa| < 0.05 の
+    「内側」突入は 10 件中 9 件が成功しているので、コーナーに限って判定する。
+    """
+    if abs(ctx.path_kappa) <= OVERTAKE_CORNER_KAPPA:
+        return False
+    side = resolve_overtake_side(ctx)
+    if side == "none":
+        return False
+    inside_is_left = ctx.path_kappa > 0.0   # kappa > 0 = 左コーナー
+    return (side == "left") == inside_is_left
+
+
 class LateralShiftSideFilter:
     """左右の空き幅差から「どちら側へ寄せるか」を決める。二段閾値 + ラッチ + dwell 付き。
 
@@ -474,6 +496,11 @@ class FollowPathState(DrivingState):
 
     def check_transition(self, ctx: StateContext) -> Optional[str]:
 
+        # コーナーの内側へは仕掛けない (is_inside_corner_overtake 参照)。
+        # 突入条件そのものは変えず、内側と判定されたときだけ見送る。
+        is_inside_corner = is_inside_corner_overtake(ctx)
+
+
         ###################################################
         # follow path -> recovery (always immediate)
         ###################################################
@@ -547,6 +574,7 @@ class FollowPathState(DrivingState):
             if (
                 lead_speed < 1.0 / 3.6
                 and ctx.min_forward_overtake_width >= MIN_OVERTAKE_WIDTH_M
+                and not is_inside_corner   # コーナー内側は構造的に幅が無い
             ):
                 return self._exit(ctx, "overtake", "forward_vehicle_stop_with_width_between_Vf<=25km/h_and_Ve>=29km/h")
 
@@ -554,6 +582,7 @@ class FollowPathState(DrivingState):
                 is_overtake_gap
                 and ctx.min_forward_overtake_width >= MIN_OVERTAKE_WIDTH_M
                 and has_future_width
+                and not is_inside_corner   # コーナー内側は構造的に幅が無い
                 # and is_same_lane # shift waypoint pure pursuit
             ):
                 return self._exit(ctx, "overtake", "safe_width_between_Vf<=25km/h_and_Ve>=29km/h")
@@ -666,6 +695,7 @@ class FollowPathState(DrivingState):
                 if (
                     lead_speed < 1.0 / 3.6
                     and ctx.min_forward_overtake_width >= MIN_OVERTAKE_WIDTH_M
+                    and not is_inside_corner   # コーナー内側は構造的に幅が無い
                 ):
                     return self._exit(ctx, "overtake", "stop_with_width_in_enough_distance")
 
@@ -676,6 +706,7 @@ class FollowPathState(DrivingState):
                     and is_slow_leader
                     and is_ttc_close
                     and has_future_width
+                    and not is_inside_corner   # コーナー内側は構造的に幅が無い
                     # and is_same_lane # shift waypoint pure pursuit
                 ):
                     return self._exit(ctx, "overtake", "safe_width_with_enough_distance")
@@ -926,6 +957,11 @@ class FollowState(DrivingState):
 
     def check_transition(self, ctx: StateContext) -> Optional[str]:
 
+        # コーナーの内側へは仕掛けない (is_inside_corner_overtake 参照)。
+        # 突入条件そのものは変えず、内側と判定されたときだけ見送る。
+        is_inside_corner = is_inside_corner_overtake(ctx)
+
+
         ##########################################
         # follow -> recovery
         ##########################################
@@ -1054,6 +1090,7 @@ class FollowState(DrivingState):
             and speed_diff >= OVERTAKE_CORNER_SPEED_MARGIN_MPS
             and not ctx.has_left_side_vehicle
             and not ctx.has_right_side_vehicle
+            and not is_inside_corner   # コーナー内側は構造的に幅が無い
         ):
             return self._exit(ctx, "overtake", "future_width_overtake")
 
@@ -1086,6 +1123,7 @@ class FollowState(DrivingState):
             and has_corner_speed_margin
             and not ctx.has_left_side_vehicle
             and not ctx.has_right_side_vehicle
+            and not is_inside_corner   # コーナー内側は構造的に幅が無い
         ):
             return self._exit(ctx, "overtake", "corner_overtake")
 
@@ -1093,6 +1131,7 @@ class FollowState(DrivingState):
         if (
             lead_speed < 1.0 / 3.6
             and ctx.min_forward_overtake_width >= MIN_OVERTAKE_WIDTH_M
+            and not is_inside_corner   # コーナー内側は構造的に幅が無い
         ):
             return self._exit(ctx, "overtake", "forward_vehicle_stop")
 
@@ -1104,6 +1143,7 @@ class FollowState(DrivingState):
             and is_slow_leader
             and is_ttc_close
             and has_future_width
+            and not is_inside_corner   # コーナー内側は構造的に幅が無い
             # and is_same_lane # shift waypoint pure pursuit
             # and has_long_gap
         ):
