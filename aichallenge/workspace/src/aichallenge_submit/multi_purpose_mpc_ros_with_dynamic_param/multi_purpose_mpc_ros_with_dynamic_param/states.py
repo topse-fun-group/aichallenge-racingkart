@@ -107,10 +107,6 @@ OVERTAKE_PREDICT_LAT_ACCEL_MPSS  = 0.6   # [m/s^2] 先行車の横方向加速�
 OVERTAKE_ABORT_WIDTH_M           = 2.3   # [m] 寄せ側がこれを下回ったら中断
                                          #     突入は MIN_OVERTAKE_WIDTH_M (2.6) で、
                                          #     二段閾値にしてノイズでの往復を防ぐ
-OVERTAKE_CORNER_WIDTH_MARGIN_M   = 0.6   # [m] コーナーで突入に上乗せする幅。
-                                         # 幅の縮小速度は実測 0.95m/s あり、突入時に
-                                         # ぎりぎりだとコーナーを抜ける前に閉じる
-                                         # (|k| 0.05-0.10 は 15 件中 10 件が narrow 中断)
 
 # ---------------------------------------------------------------------------
 # recovery state parameter
@@ -122,6 +118,10 @@ RECOVERY_CROSS_ANGLE_DEG     = 30.0  # [deg] またぐ向きの目標角。e_y >
 RECOVERY_MIN_PHASE_SEC       = 0.5   # [s]   交差が成立していても各フェーズは最低これだけ
                                      #       動く。刺さった時点で既に交差していると
                                      #       1 tick も動かずに復帰を抜けてしまうため
+# 前進フェーズの役割は後退で作った向きのままセンターラインへ戻ること。後退と同じ
+# 「またぐ向きか」を離脱条件にすると、後退が成功した時点で既に成立しているので
+# 前進が RECOVERY_MIN_PHASE_SEC ちょうどで終わり、戻りきらないまま復帰を抜ける。
+RECOVERY_RETURN_E_Y_M        = 0.8   # [m]   前進フェーズの離脱: センターラインとの距離
 RECOVERY_STEER_K             = 1.8   # [-]   目標姿勢との角度差 → 舵角のゲイン
                                      #       1.0 = ずれた角度分そのまま切る
 RECOVERY_BOOST_VALUE         = 0.0   # [-]   復帰後の boost 値 (OvertakeState と同値)
@@ -713,10 +713,19 @@ class RecoveryState(DrivingState):
 
     早期離脱
     --------
-    ``back`` / ``forward_turn`` はいずれも目標のまたぐ向きに達した
-    (``e_psi * cross_sign >= RECOVERY_CROSS_ANGLE_DEG``) 時点で次へ進む。
-    ただし ``RECOVERY_MIN_PHASE_SEC`` の間は離脱しない。刺さった時点で既に
-    またぐ向きだと、1 tick も動かずに復帰を抜けて再び stuck するため。
+    2 つのフェーズは役割が違うので、離脱条件も別にする。
+
+    - ``back``: またぐ向きを**作る**。``e_psi * cross_sign >= RECOVERY_CROSS_ANGLE_DEG``
+      で切り上げる。
+    - ``forward_turn``: その向きのままセンターラインへ**戻る**。
+      ``|path_e_y| <= RECOVERY_RETURN_E_Y_M`` で切り上げる。
+
+    両フェーズに同じ「またぐ向きか」を使うと、``back`` が成功した時点で既に成立して
+    いるので ``forward_turn`` が ``RECOVERY_MIN_PHASE_SEC`` ちょうどで終わり、
+    コースへ戻りきらないまま ``follow_path`` に渡ってしまう。
+
+    どちらのフェーズも ``RECOVERY_MIN_PHASE_SEC`` の間は離脱しない。刺さった時点で
+    既に条件を満たしていると、1 tick も動かずに復帰を抜けて再び stuck するため。
     各フェーズの時間はフェーズ開始からで測るので、``back`` を早く抜けても
     ``forward_turn`` の持ち時間は変わらない。
 
@@ -725,11 +734,13 @@ class RecoveryState(DrivingState):
     """
 
     BACK_DURATION_TIME_SEC = 2.0     # [s] 最大後退時間
-    FORWARD_DURATION_TIME_SEC = 1.5  # [s] 最大前進時間
-                                     # 前進フェーズの役割は姿勢を戻すことで、加速ではない。
-                                     # 3.0s だと整列条件を満たせない急コーナーで毎回
-                                     # タイムアウトまで全開加速し、+15km/h ほど乗せた状態で
-                                     # コーナーへ復帰していた (ADR-033)。
+    FORWARD_DURATION_TIME_SEC = 2.5  # [s] 最大前進時間
+                                     # AWSIM の加速度上限 1.37m/s^2 では 1.5s = 1.5m しか
+                                     # 進めず、2〜3m 横にずれた位置から戻りきれなかった。
+                                     # 2.5s なら 4.3m 進み、-30度の姿勢で横に 2.1m 戻せる。
+                                     # ADR-033 は 3.0 -> 1.5 に下げたが、それは整列条件を
+                                     # 満たせず毎回タイムアウトしていた頃の話で、
+                                     # 現在は横偏差で早期離脱できる (ADR-035)。
 
     # 速度・加速度はいずれも「車両側の上限まで出し切る」ことを狙った値。
     # override 経路には np.clip(acc, a_min, a_max) が掛からない (mpc_controller が
@@ -812,13 +823,23 @@ class RecoveryState(DrivingState):
         return (self._heading_error(ctx) * self._cross_sign
                 >= np.deg2rad(RECOVERY_CROSS_ANGLE_DEG))
 
-    def _phase_done(self, ctx: StateContext, phase_elapsed: float) -> bool:
-        """フェーズを切り上げてよいか。
+    def _back_done(self, ctx: StateContext, phase_elapsed: float) -> bool:
+        """後退を切り上げてよいか。役割はまたぐ向きを作ること。
 
         最低 RECOVERY_MIN_PHASE_SEC は動かす。刺さった時点で既にまたぐ向きだと、
-        1 tick も後退せずに復帰を抜けて再び stuck するため。
+        1 tick も後退せずに次へ進んでしまうため。
         """
         return phase_elapsed >= RECOVERY_MIN_PHASE_SEC and self._has_crossed(ctx)
+
+    def _forward_done(self, ctx: StateContext, phase_elapsed: float) -> bool:
+        """前進を切り上げてよいか。役割はセンターラインまで戻ること。
+
+        後退と同じ「またぐ向きか」を条件にすると、後退が成功した時点で既に成立して
+        いるので前進が最低時間ちょうどで終わり、コースへ戻りきらないまま
+        follow_path に渡ってしまう。前進には横偏差という別の指標を与える。
+        """
+        return (phase_elapsed >= RECOVERY_MIN_PHASE_SEC
+                and abs(ctx.path_e_y) <= RECOVERY_RETURN_E_Y_M)
 
     def check_transition(self, ctx: StateContext) -> Optional[str]:
         if self._enter_time is None:
@@ -830,7 +851,7 @@ class RecoveryState(DrivingState):
 
         if self._phase == "back":
             # またぐ向きに達したら後退を打ち切って前進へ
-            if (self._phase_done(ctx, phase_elapsed)
+            if (self._back_done(ctx, phase_elapsed)
                     or phase_elapsed >= self.BACK_DURATION_TIME_SEC):
                 self._enter_phase("forward_turn", ctx)
             return None
@@ -840,10 +861,10 @@ class RecoveryState(DrivingState):
         # recovery -> follow path
         ###################################################
 
-        # forward_turn: またぐ向きに達したら即座に通常走行へ戻る
-        if (self._phase_done(ctx, phase_elapsed)
+        # forward_turn: センターライン近傍まで戻ったら通常走行へ返す
+        if (self._forward_done(ctx, phase_elapsed)
                 or phase_elapsed >= self.FORWARD_DURATION_TIME_SEC):
-            return self._exit(ctx, "follow_path", "crossed")
+            return self._exit(ctx, "follow_path", "returned")
 
         return None
 

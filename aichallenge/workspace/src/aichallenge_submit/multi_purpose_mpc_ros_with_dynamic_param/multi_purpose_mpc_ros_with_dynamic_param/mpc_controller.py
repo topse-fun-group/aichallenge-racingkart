@@ -248,6 +248,7 @@ class MPCController(Node):
             "lateral_shift_dwell_sec": ("LATERAL_SHIFT_DWELL_SEC", float(states.LATERAL_SHIFT_DWELL_SEC)),
             "recovery_cross_angle_deg": ("RECOVERY_CROSS_ANGLE_DEG", float(states.RECOVERY_CROSS_ANGLE_DEG)),
             "recovery_min_phase_sec": ("RECOVERY_MIN_PHASE_SEC", float(states.RECOVERY_MIN_PHASE_SEC)),
+            "recovery_return_e_y_m": ("RECOVERY_RETURN_E_Y_M", float(states.RECOVERY_RETURN_E_Y_M)),
             "recovery_steer_k": ("RECOVERY_STEER_K", float(states.RECOVERY_STEER_K)),
             "recovery_boost_value": ("RECOVERY_BOOST_VALUE", float(states.RECOVERY_BOOST_VALUE)),
             "recovery_boost_duration_sec": ("RECOVERY_BOOST_DURATION_SEC", float(states.RECOVERY_BOOST_DURATION_SEC)),
@@ -414,6 +415,7 @@ class MPCController(Node):
 
         # --- Stuck detection ---
         self._stopped_since = None  # time when velocity first dropped near zero
+        self._has_ever_moved = False  # 一度でも走り出したか (グリッド待機の除外用)
         self._start_time = None
         self._last_recovery_exit_time = None
 
@@ -1142,14 +1144,21 @@ class MPCController(Node):
         v = self._odom.twist.twist.linear.x  # type: ignore
 
         # --- Stuck detection: track how long velocity has been near zero ---
+        # スタート前のグリッド待機は「止まっている」だけで stuck ではない。制御ノードは
+        # 青信号を待たずに回り始める (_enable_control の初期値は True) ので、一度も
+        # 走り出していないうちから積算すると STUCK_DURATION (0.7s) を即座に超え、
+        # 発進せずに RecoveryState へ入って後退してしまう。
         STOPPED_THRESHOLD = 0.3  # [m/s]
-        if abs(v) < STOPPED_THRESHOLD:
+        moving = abs(v) >= STOPPED_THRESHOLD
+        self._has_ever_moved = self._has_ever_moved or moving
+
+        if moving or not self._has_ever_moved:
+            self._stopped_since = None
+            time_stopped = 0.0
+        else:
             if self._stopped_since is None:
                 self._stopped_since = now_sec
             time_stopped = now_sec - self._stopped_since
-        else:
-            self._stopped_since = None
-            time_stopped = 0.0
 
         (
             fwd_dist,
