@@ -228,6 +228,7 @@ class MPCController(Node):
         STATE_PARAM_MAP = {
             "stuck_velocity_threshold": ("STUCK_VELOCITY_THRESHOLD", float(states.STUCK_VELOCITY_THRESHOLD)),
             "stuck_duration": ("STUCK_DURATION", float(states.STUCK_DURATION)),
+            "recovery_cooldown_sec": ("RECOVERY_COOLDOWN_SEC", float(states.RECOVERY_COOLDOWN_SEC)),
             "forward_cone_deg": ("FORWARD_CONE_DEG", float(states.FORWARD_CONE_DEG)),
             "forward_lateral_max": ("FORWARD_LATERAL_MAX", float(states.FORWARD_LATERAL_MAX)),
             "follow_lateral_clear_m": ("FOLLOW_LATERAL_CLEAR_M", float(states.FOLLOW_LATERAL_CLEAR_M)),
@@ -1237,7 +1238,9 @@ class MPCController(Node):
         if (now_sec - self._start_time) < 2.0: # 10.0
             is_cooldown = True
         if self._last_recovery_exit_time is not None:
-            if (now_sec - self._last_recovery_exit_time) < 2.0: # 5.0
+            # 2.0 のハードコードだった。停止車の脇を抜けている最中に 2 秒ごとに
+            # recovery へ引き戻され、前進 (+0.387 m/s) を打ち消していた (ADR-058)。
+            if (now_sec - self._last_recovery_exit_time) < states.RECOVERY_COOLDOWN_SEC:
                 is_cooldown = True
 
         # Closest waypoint orientation & signed lateral distance

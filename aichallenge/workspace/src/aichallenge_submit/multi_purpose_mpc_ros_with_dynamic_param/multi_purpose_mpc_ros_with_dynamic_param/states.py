@@ -157,6 +157,13 @@ RECOVERY_MIN_PHASE_SEC       = 0.5   # [s]   交差が成立していても各�
 RECOVERY_RETURN_E_Y_M        = 0.8   # [m]   前進フェーズの離脱: センターラインとの距離
 RECOVERY_STEER_K             = 1.8   # [-]   目標姿勢との角度差 → 舵角のゲイン
                                      #       1.0 = ずれた角度分そのまま切る
+# 復帰を抜けた後、スタック判定による再突入を抑制する時間 (ADR-058)。
+# 2.0 では停止車の脇をじりじり抜けている最中に 2 秒ごとに引き戻され、
+# 本番 (1788192349054) で 69 秒のあいだ recovery を 15 回繰り返した。
+# その 15 件中 13 件が「ちょうど 2.0 秒」= クールダウン明けの瞬間の再突入で、
+# 他 8 走行の 31 件では 2.0 秒は 1 件だけだった。
+# base_design.md が記述する設計値は 5.0 で、2.0 は ADR 無しの逸脱だった。
+RECOVERY_COOLDOWN_SEC        = 4.0   # [s]
 RECOVERY_BOOST_VALUE         = 0.0   # [-]   復帰後の boost 値 (OvertakeState と同値)
 RECOVERY_BOOST_DURATION_SEC  = 2.0   # [s]   復帰後に boost を維持する時間
 
