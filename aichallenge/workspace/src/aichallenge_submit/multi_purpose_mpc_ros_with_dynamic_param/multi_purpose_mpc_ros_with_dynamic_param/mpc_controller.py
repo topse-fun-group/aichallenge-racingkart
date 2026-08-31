@@ -261,6 +261,7 @@ class MPCController(Node):
             "overtake_corner_lookahead_m": ("OVERTAKE_CORNER_LOOKAHEAD_M", float(states.OVERTAKE_CORNER_LOOKAHEAD_M)),
             "overtake_corner_max_dist_m": ("OVERTAKE_CORNER_MAX_DIST_M", float(states.OVERTAKE_CORNER_MAX_DIST_M)),
             "overtake_corner_speed_margin_mps": ("OVERTAKE_CORNER_SPEED_MARGIN_MPS", float(states.OVERTAKE_CORNER_SPEED_MARGIN_MPS)),
+            "overtake_inside_veto_margin_mps": ("OVERTAKE_INSIDE_VETO_MARGIN_MPS", float(states.OVERTAKE_INSIDE_VETO_MARGIN_MPS)),
             "overtake_commit_sec": ("OVERTAKE_COMMIT_SEC", float(states.OVERTAKE_COMMIT_SEC)),
             "overtake_return_sec": ("OVERTAKE_RETURN_SEC", float(states.OVERTAKE_RETURN_SEC)),
             "overtake_return_brake_mpss": ("OVERTAKE_RETURN_BRAKE_MPSS", float(states.OVERTAKE_RETURN_BRAKE_MPSS)),
@@ -423,6 +424,8 @@ class MPCController(Node):
         self._start_time = None
         self._last_recovery_exit_time = None
         self._overtake_exit_time = None  # 追い越しを抜けた時刻 (復帰中の速度制限用)
+        # (d_offset, weight, alpha, steer_cmd, ego_e_y)。追い越し操舵の診断 (ADR-049)
+        self._shift_diag = None
 
         # --- Lateral shift side (寄せ側) hysteresis ---
         self._shift_side_filter = states.LateralShiftSideFilter()
@@ -763,6 +766,7 @@ class MPCController(Node):
             target_shifted_x = rear_x
             target_shifted_y = rear_y
             found_lookahead = False
+            used_offset, used_weight = 0.0, 0.0
 
             for i in range(n_wps):
                 idx = (closest_idx + i) % n_wps
@@ -787,6 +791,7 @@ class MPCController(Node):
                 if np.hypot(shift_x - rear_x, shift_y - rear_y) >= lookahead_distance:
                     target_shifted_x = shift_x
                     target_shifted_y = shift_y
+                    used_offset, used_weight = d_offset, weight
                     found_lookahead = True
                     break
 
@@ -802,6 +807,17 @@ class MPCController(Node):
                 2.0 * wheel_base * np.sin(alpha), lookahead_distance
             )
             steer_cmd = float(np.clip(steering_tire_angle, -0.55, 0.55))
+
+            # 横に出られない機序を切り分けるための診断 (ADR-049)。挙動には影響しない。
+            # 目標 2.41m に対し実測の横偏差が 0.57m しか出ていないので、
+            # クランプ (used_offset) / 先読み点の重み (used_weight) /
+            # 操舵 (alpha, steer_cmd) のどこで落ちているかを記録する。
+            wp0 = wps[closest_idx]
+            ego_e_y = float(
+                -(pose.x - wp0.x) * np.sin(float(wp0.psi))
+                + (pose.y - wp0.y) * np.cos(float(wp0.psi)))
+            self._shift_diag = (float(used_offset), float(used_weight),
+                                float(alpha), steer_cmd, ego_e_y)
 
             return target_speed_mps, steer_cmd
         except Exception as e:
@@ -1267,8 +1283,14 @@ class MPCController(Node):
             path_e_y=path_e_y,
             path_kappa=path_kappa,
             in_tight_corner=in_tight_corner,
+            # この地点で出せる速度。_control のコーナー速度上限 (ADR-033 決定 2) と
+            # 同じ式で、内側 veto の例外判定が参照する (ADR-054)。
+            speed_cap_mps=float(min(
+                states.VEHICLE_V_MAX / 3.6,
+                np.sqrt(self._mpc_cfg.ay_max / (abs(path_kappa) + 1e-6)))),
             forward_vehicle_distance=fwd_dist,
             forward_vehicle_lateral=fwd_lateral,
+            shift_diag=self._shift_diag,
             forward_vehicle_speed=fwd_speed,
             forward_vehicle_heading_diff=fwd_heading_diff,
             nearest_vehicle_s_rel=nearest_s_rel,
@@ -1471,6 +1493,18 @@ class MPCController(Node):
             # 目標にしていたため、曲がりきれずに壁へ向かっていた (ADR-033)。
             if ctx.in_tight_corner:
                 v_corner = np.sqrt(self._mpc_cfg.ay_max / (abs(ctx.path_kappa) + 1e-6))
+                # 追い越し中は先行車速を下回らせない (ADR-049)。この上限は
+                # |kappa|=0.15 で 16.1km/h まで落ちる一方、先行車は同じコーナーを
+                # 24km/h で曲がっている。上限が先行車より遅いと追い越しは構造的に
+                # 不可能で、実測では追い越し中の速度が中央 18.9km/h まで落ち、
+                # 「幅があるのに低速の先行車に合わせて抜けない」状態になっていた。
+                # 先行車がその速度で曲がれている以上、同じ速度は物理的に出せる。
+                if (isinstance(current_state, states.OvertakeState)
+                        and ctx.forward_vehicle_speed is not None):
+                    v_corner = max(
+                        v_corner,
+                        ctx.forward_vehicle_speed
+                        + states.OVERTAKE_CORNER_SPEED_MARGIN_MPS)
                 v_target = min(v_target, v_corner)
 
             u = [v_target, steer_target]

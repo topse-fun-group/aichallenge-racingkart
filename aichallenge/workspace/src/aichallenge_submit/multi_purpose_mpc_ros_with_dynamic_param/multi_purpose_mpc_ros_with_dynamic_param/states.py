@@ -81,6 +81,11 @@ FOLLOW_TARGET_DISTANCE_M    = 1.2
 # overtake state parameter
 # ---------------------------------------------------------------------------
 MIN_OVERTAKE_WIDTH_M      = 2.6     # [m] 最低追い越し幅 (default 2.5)
+# NOTE: ADR-051 で「低速の相手には 2.0m に下げる」を試したが撤回した (ADR-052)。
+#       幅は blocker ではなく、停止車には横に出るのが間に合わない
+#       (指令 2.13m に対し実測 0.29m) のが原因で、下げると実行できない
+#       追い越しへ突入する許可を与えるだけだった。低速の相手への試行が
+#       13 件・成功率 85% から 290 件・成功率 10%・stuck 241 件に悪化した。
 MIN_OVERTAKE_LEAD_SPEED   = 25.0    # [km/s] 前方車両の最低追い越し速度
 OVERTAKE_CLOSING_MARGIN_M = 1.0     # [m] 追い越し時の車間距離の余裕距離
 OVERTAKE_TTC_SEC          = 0.3     # [s] TTCの時間
@@ -109,6 +114,12 @@ OVERTAKE_CORNER_MAX_DIST_M       = 6.0   # [m] 仕掛ける最大車間 (中心�
 OVERTAKE_CORNER_SPEED_MARGIN_MPS = 2.0   # [m/s] 必要な相対速度の下限。
                                          # 0.0 は実質無条件で、実測の成功率は 23%。
                                          # 実速度差を要求する条件は 93〜100% だった。
+# 内側 veto (is_inside_corner_overtake) を掛けない速度余裕。コーナー
+# (|kappa| > OVERTAKE_CORNER_KAPPA) での「出せる速度 - 先行車速」の実測:
+#   veto の根拠データ (ADR-036, 先行車 20-30km/h, n=11665)  中央 -0.15  95% 1.05
+#   低速 NPC (先行車 5-15km/h, n=332)                       中央 +3.54   5% 2.26
+# 3.0 なら根拠データへの漏れ 0%、低速 NPC を 80% 拾う (2.0 では 1% / 99%)。
+OVERTAKE_INSIDE_VETO_MARGIN_MPS  = 3.0   # [m/s]
 OVERTAKE_COMMIT_SEC              = 1.5   # [s] 幅不足・ロストでも中断しない最低継続時間
 OVERTAKE_HARD_ABORT_WIDTH_M      = 1.5   # [m] 幅が崩壊。コミット期間を無視して即中断
 OVERTAKE_PREDICT_HORIZON_SEC     = 2.0   # [s] 先行車位置の予測ホライズン
@@ -121,6 +132,11 @@ OVERTAKE_PREDICT_LAT_ACCEL_MPSS  = 0.6   # [m/s^2] 先行車の横方向加速�
 # 一瞬で 0 に戻るため相手の車線へ切り返す形になる。落として抜けさせる。
 OVERTAKE_RETURN_SEC              = 1.0   # [s] 上限を掛ける時間
 OVERTAKE_RETURN_BRAKE_MPSS       = 2.0   # [m/s^2] 上限の逆算に使う実効制動力
+# NOTE: ADR-050 で「中断直後の再突入では前回の寄せ側を引き継ぐ」を試したが撤回した
+#       (ADR-053)。狙いだった側の反転は 60% -> 56% しか動かず (門番の
+#       >= OVERTAKE_HARD_ABORT_WIDTH_M が、幅で降りた側をまさに弾くため)、
+#       発火した 9 件は反対側に 4.17m あるのに 1.81m の側へ突入させて全件失敗した。
+#       recovery は 2 走行とも 3.3-3.5 -> 6.6-6.9 件/10分 と倍増した。
 OVERTAKE_ABORT_WIDTH_M           = 2.3   # [m] 寄せ側がこれを下回ったら中断
                                          #     突入は MIN_OVERTAKE_WIDTH_M (2.6) で、
                                          #     二段閾値にしてノイズでの往復を防ぐ
@@ -203,11 +219,15 @@ class StateContext:
     path_kappa: float = 0.0      # [1/m] 先読み区間で最も曲率が大きい点の符号付き曲率
     in_tight_corner: bool = False  # 先読み区間に回頭角 120 度未満のコーナーがあるか
                                  #       正 = 左コーナー (内側が左)
+    # その地点で出せる速度 [m/s]。ADR-033 のコーナー速度上限と同じ式 (ADR-054)。
+    speed_cap_mps: float = VEHICLE_V_MAX / 3.6
 
     # --- V2X (Phase 2) ------------------------------------------------------
     forward_vehicle_distance: Optional[float] = None # [m]
     forward_vehicle_gap: float = 0.0                 # [m] bumper-to-bumper (distance - VEHICLE_LENGTH)
     forward_vehicle_lateral: Optional[float] = None  # [m] 先行車の横偏差 (左が正)
+    # 追い越し操舵の診断 (d_offset, weight, alpha, steer_cmd, ego_e_y)。ADR-049。
+    shift_diag: Optional[tuple] = None
     forward_vehicle_speed: Optional[float] = None    # [m/s]
     forward_vehicle_heading_diff: float = 0.0        # absolute heading diff relative to path_psi [rad]
     nearest_vehicle_s_rel: Optional[float] = None    # [m] signed; negative = behind ego
@@ -378,6 +398,14 @@ def is_inside_corner_overtake(ctx: StateContext) -> bool:
     lead = ctx.closest_forward_vehicle_speed
     if lead is not None and lead < FOLLOW_LEADER_MOVING_MPS:
         return False
+    # 停止していなくても、自車がここで出せる速度に対して十分に遅い相手なら
+    # 同じ理由で veto しない (ADR-054)。veto の根拠 (ADR-036) は全車が約 24km/h で
+    # 走る dev ログの実測で、そこでは「出せる速度 - 先行車速」が中央 -0.15m/s
+    # (95% 分位 1.05) しかなく、この例外は掛からない。本番の低速 NPC
+    # (5-15km/h) では中央 +3.54m/s (5% 分位 2.26) と母集団が分離している。
+    if lead is not None and (
+            ctx.speed_cap_mps - lead) >= OVERTAKE_INSIDE_VETO_MARGIN_MPS:
+        return False
     side = resolve_overtake_side(ctx)
     if side == "none":
         return False
@@ -513,6 +541,15 @@ class DrivingState(ABC):
         enter_time = getattr(self, "_enter_time", None)
         elapsed = ctx.current_time_sec - enter_time if enter_time is not None else 0.0
         side = self._log_side(ctx)
+        # 追い越しで横に出られない機序の切り分け用 (ADR-049)。
+        # d_off: 壁クランプ後の実効オフセット / w: 先読み点の Hann 重み
+        # alpha: 先読み点への角度 / steer: 出版前の舵角 / e_y: 自車の横偏差
+        diag = ""
+        if ctx.shift_diag is not None:
+            d_off, w, alpha, steer, ego_e_y = ctx.shift_diag
+            diag = (f" d_off={d_off:+.2f} w={w:.2f}"
+                    f" alpha={np.rad2deg(alpha):+.1f} steer={np.rad2deg(steer):+.1f}"
+                    f" e_y={ego_e_y:+.2f}")
         ctx.log_event(
             f"[{self.name}] exit reason={reason} to={next_state} elapsed={elapsed:.2f}s"
             f" | vehicleID={ctx.state_id}"
@@ -532,6 +569,12 @@ class DrivingState(ABC):
             # 先行車の横偏差 (左が正)。幅の非対称の直接の原因。
             f" fwd_lat={num(ctx.forward_vehicle_lateral)}"
             f" tight={int(ctx.in_tight_corner)}"
+            # その地点で出せる速度 [km/h]。内側 veto の例外 (ADR-054) の入力そのもの。
+            # cap - forward_v >= OVERTAKE_INSIDE_VETO_MARGIN_MPS が成立していたかを
+            # 事後に数えられる。dev では先行車が 99% 24.8km/h でこの例外は
+            # ほぼ発火しないため、判定は本番ログでしかできない。
+            f" cap={ctx.speed_cap_mps * 3.6:.1f}"
+            f"{diag}"
             f" kappa={ctx.path_kappa:+.3f}"
             f" offset={num(ctx.target_overtake_offset)}")
         return next_state

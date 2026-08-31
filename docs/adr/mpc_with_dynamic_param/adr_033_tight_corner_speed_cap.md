@@ -57,6 +57,11 @@ return "left" if left_w >= right_w else "right"
 
 ### 2. 回頭角 120° 未満のコーナーで曲率から速度上限を掛ける
 
+> **ADR-049 で追い越し中のみ緩和**。この上限は |kappa|=0.15 で 16.1km/h まで落ちる一方、
+> 先行車は同じコーナーを 24km/h で曲がっており、上限が先行車速を下回ると追い越しが
+> 構造的に不可能になっていた。`OvertakeState` のときだけ「先行車速 + 2.0 m/s」を
+> 下限にする。追い越し中以外は不変。
+
 `_update_waypoint_cache` で一度だけコーナー区間を切り出し、
 `|∫kappa ds| < TIGHT_CORNER_MAX_TURN_DEG` の区間に印を付ける
 （`kappa = wrap(psi_ahead − psi_behind)/ds` なので `Σ kappa·ds` は方位差そのもの）。
