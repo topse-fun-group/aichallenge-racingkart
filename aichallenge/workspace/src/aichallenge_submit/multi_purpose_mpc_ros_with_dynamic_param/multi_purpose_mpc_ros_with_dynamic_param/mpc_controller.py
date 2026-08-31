@@ -1244,19 +1244,15 @@ class MPCController(Node):
         path_kappa = float(kappa_window[np.argmax(np.abs(kappa_window))])
         in_tight_corner = bool(self._waypoint_tight_corner[look_idxs].any())
 
-        # T 秒後の左右の幅。回頭角 120 度未満のコーナーでだけ予測する。
-        # 直線で予測を掛けると、加速度項がコース幅を超えて片側を 0 に飽和させ、
-        # ノイジーな heading_diff (先行車 25km/h で方位ノイズ σ≈22deg) の符号だけで
-        # 寄せ側が決まって毎 tick 反転する。将来幅 = 現在幅 にすると
-        # resolve_overtake_side の min(now, future) が min(now, now) に退化し、
-        # 「現在幅が広い側」という安定した判定に戻る (ADR-034 追記)。
-        if in_tight_corner:
-            left_wf, right_wf = states.predict_overtake_widths(
-                left_w, right_w,
-                fwd_speed if fwd_speed is not None else 0.0,
-                fwd_heading_diff)
-        else:
-            left_wf, right_wf = left_w, right_w
+        # 将来幅の予測は撤回した (ADR-048)。ADR-047 で入れた計測により、
+        # 予測が適用されていた突入 (tight=1) は同じ |kappa| 0.10-0.16 帯で
+        # 成功 16% / 幅中断 68%、非適用 (tight=0) は 50% / 46% と 3 倍の差があった。
+        # 予測した将来幅と実際の離脱時の幅の誤差は中央 -1.09m (50% が 1m 以上過小)。
+        # ホライズン T=2.0s に対し実際の追い越しは 1.60s しか続かず、
+        # 加速度項だけで 0.5*0.6*2^2 = 1.20m 縮むと出すため、縮小を常に誇張していた。
+        # 将来幅 = 現在幅 にすると resolve_overtake_side の min(now, future) が
+        # min(now, now) に退化し、「現在幅が広い側」という安定した判定に戻る。
+        left_wf, right_wf = left_w, right_w
 
         return StateContext(
             current_time_sec=now_sec,

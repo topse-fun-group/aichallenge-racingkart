@@ -293,6 +293,14 @@ def predict_overtake_widths(left: float, right: float,
                             lead_speed: float, heading_diff: float):
     """T 秒後の左右の空き幅 (left_future, right_future) を返す。
 
+    **現在は未使用 (ADR-048 で撤回)。** 実測で、この予測が適用されていた突入は
+    同じ |kappa| 0.10-0.16 帯で成功 16% / 幅中断 68%、非適用は 50% / 46% と
+    3 倍の差があった。予測と実際の離脱時の幅の誤差は中央 -1.09m。
+    ホライズン T=2.0s に対し実際の追い越しは 1.60s しか続かず、
+    先行車の横速度を一定として 2 秒外挿する仮定が成り立っていなかった。
+    式そのものの記録として関数は残す (呼び出しは _build_state_context から外した)。
+
+
     先行車の速度をセンターライン法線方向に分解し、横加速度
     OVERTAKE_PREDICT_LAT_ACCEL_MPSS で T 秒進んだ移動量 d を左右に加減する。
     先行車が左へ寄る (heading_diff > 0) なら左が狭まり右が広がる。
@@ -513,6 +521,17 @@ class DrivingState(ABC):
             f" gap={num(ctx.forward_vehicle_distance)}"
             f" side={side} side_w={overtake_width_of(ctx, side):.2f}"
             f" min_w={ctx.min_forward_overtake_width:.2f}"
+            # 左右の幅を別々に出す。合計 (lw + rw) はその地点の実質コース幅、
+            # 差はセンターラインに対する先行車の寄り具合になるので、
+            # 「コース形状が狭い」のか「先行車がラインから外れている」のかを
+            # 事後に切り分けられる。min_w だけでは両者が区別できなかった。
+            f" lw={ctx.overtake_width_left:.2f} rw={ctx.overtake_width_right:.2f}"
+            # T 秒後の予測幅。突入判定が実際に何を見ていたかの記録。
+            f" lwf={ctx.overtake_width_left_future:.2f}"
+            f" rwf={ctx.overtake_width_right_future:.2f}"
+            # 先行車の横偏差 (左が正)。幅の非対称の直接の原因。
+            f" fwd_lat={num(ctx.forward_vehicle_lateral)}"
+            f" tight={int(ctx.in_tight_corner)}"
             f" kappa={ctx.path_kappa:+.3f}"
             f" offset={num(ctx.target_overtake_offset)}")
         return next_state
