@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from typing import Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import os, shutil
 from datetime import datetime
@@ -34,10 +34,12 @@ class ReferenceVelocityConfigulator():
             self,
             node: Node,
             ref_path_config_path: str,
-            ref_vel_config_path: str) -> None:
+            ref_vel_config_path: str,
+            on_change: Optional[Callable[[], None]] = None) -> None:
 
         self._node = node
 
+        self._on_change = on_change
         self._ref_vel_config_path = ref_vel_config_path
         self._reference_path = ReferencePathGenerator.get_reference_path(ref_path_config_path)
         self._ref_vel_cfg = self._load_config(ref_vel_config_path)
@@ -64,6 +66,9 @@ class ReferenceVelocityConfigulator():
                     self._node.declare_parameter(f"ref_vel/{section_name}/{key}", value)
 
             self._node.declare_parameter(f"ref_vel/save", False)
+
+            if self._on_change is not None:
+                self._on_change()
 
         def param_cb(parameters):
             for param in parameters:

@@ -15,13 +15,36 @@ def _stamp_to_seconds(stamp) -> float:
     return float(stamp.sec) + float(stamp.nanosec) * 1e-9
 
 
-class V2XVehicleTracker:
-    """Tracks the latest two samples per ``vehicle_id`` and exposes
-    constant-velocity predictions over a caller-provided time grid."""
+# 速度を求める差分の時間窓。V2X は 20Hz で届くため、隣接 2 点 (dt≈0.05s) の差分は
+# 位置ノイズがそのまま速度に乗る。本番 rosbag (v1.3.5) の実測:
+#
+#     窓[s]   ジッタ中央   ジッタ95%   最大推定速度
+#     0.00      4.57       19.70        63.6 km/h   <- 隣接 2 点 (従来)
+#     0.25      0.62        4.70        43.9 km/h
+#     0.50      0.30        2.27        41.4 km/h
+#
+# 実車は 35km/h 以下なので、従来の推定は最大 63.6km/h と使い物にならなかった。
+# 0.25s なら遅れ 0.125s (制御 40Hz・コミット期間 1.5s に対して十分小さい) で
+# ジッタを 95%tile で 4 分の 1 に落とせる。
+V2X_VELOCITY_WINDOW_SEC = 0.25
 
-    def __init__(self, v_max_safety: float, position_jump_threshold: float, warn_callback=None):
+# 窓に必要なサンプル数の余裕。実測のサンプル間隔は中央 0.07s。
+_SAMPLE_MAXLEN = 16
+
+
+class V2XVehicleTracker:
+    """Tracks recent samples per ``vehicle_id`` and exposes
+    constant-velocity predictions over a caller-provided time grid.
+
+    Velocity is differenced over ``velocity_window_sec`` rather than between
+    consecutive samples, so position noise is not amplified by the 20 Hz rate.
+    """
+
+    def __init__(self, v_max_safety: float, position_jump_threshold: float, warn_callback=None,
+                 velocity_window_sec: float = V2X_VELOCITY_WINDOW_SEC):
         self._v_max_safety = float(v_max_safety)
         self._jump_thresh = float(position_jump_threshold)
+        self._window = float(velocity_window_sec)
         self._warn = warn_callback if warn_callback is not None else (lambda _msg: None)
         self._samples: Dict[str, Deque[Tuple[float, float, float]]] = {}
         self._velocities: Dict[str, Tuple[float, float]] = {}
@@ -34,7 +57,7 @@ class V2XVehicleTracker:
             t = _stamp_to_seconds(v.header.stamp)
             x = float(v.position.x)
             y = float(v.position.y)
-            buf = self._samples.setdefault(vid, deque(maxlen=2))
+            buf = self._samples.setdefault(vid, deque(maxlen=_SAMPLE_MAXLEN))
 
             # Detect a position jump against the previous sample (if any).
             jumped = False
@@ -52,8 +75,15 @@ class V2XVehicleTracker:
             if jumped or len(buf) < 2:
                 self._velocities[vid] = (0.0, 0.0)
             else:
-                t0, x0, y0 = buf[0]
-                t1, x1, y1 = buf[1]
+                t1, x1, y1 = buf[-1]
+                # 窓に収まる最も古いサンプルとの差分を取る。最新サンプル自身を
+                # 選ぶと dt=0 になるので、候補は buf[:-1] に限る。窓より粗く
+                # しか届いていないときは直前サンプル (従来と同じ挙動) に落ちる。
+                t0, x0, y0 = buf[-2]
+                for sample in list(buf)[:-1]:
+                    if t1 - sample[0] <= self._window:
+                        t0, x0, y0 = sample
+                        break
                 dt = t1 - t0
                 if dt > 0.0:
                     vx = (x1 - x0) / dt

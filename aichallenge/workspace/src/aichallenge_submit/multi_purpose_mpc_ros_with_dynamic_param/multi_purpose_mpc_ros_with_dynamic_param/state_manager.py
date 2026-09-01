@@ -87,8 +87,14 @@ class StateManager:
             self._publish_state()
             return None
 
-        # Enforce minimum dwell-time (Recovery is exempt)
-        if next_name != "recovery" and self._last_transition_time is not None:
+        # Enforce minimum dwell-time (Recovery is exempt in BOTH directions).
+        # 抜ける方向も除外しないと、RecoveryState の早期離脱条件が成立しても
+        # 1.0s は forward_turn の大舵角前進 (+7 m/s, ±0.55 rad) が出続けてコースを外れる。
+        # recovery への再突入は衝突ラッチのクリア (mpc_controller の recovery 退出処理) と
+        # スタック検知のクールダウンで守られている。
+        if (next_name != "recovery"
+                and self._current.name != "recovery"
+                and self._last_transition_time is not None):
             dwell = ctx.current_time_sec - self._last_transition_time
             if dwell < self.MIN_DWELL_TIME:
                 self._publish_state()
