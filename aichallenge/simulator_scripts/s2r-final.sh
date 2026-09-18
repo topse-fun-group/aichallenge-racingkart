@@ -1,26 +1,25 @@
 #!/bin/bash
+# S2R の決勝用（4台 / handicap・ranking あり）
 
 AWSIM_DIRECTORY=/aichallenge/simulator/AWSIM
 export ROS_DOMAIN_ID=0
 
-# 車両数: 第1引数（既定 1）
-vehicles="${1:-1}"
-
 exec $AWSIM_DIRECTORY/AWSIM.x86_64 \
     --venue citycircuit \
-    --start-mode count \
-    --start-count-seconds 5 \
-    --vehicles "${vehicles}" \
+    --start-mode sync \
+    --start-count-seconds 10 \
+    --vehicles 4 \
     --npcs 0 \
     --boosts 2 \
-    --laps unlimited \
-    --timeout 10000000.0 \
+    --laps 6 \
+    --timeout 420.0 \
     --steer-source ackermann \
-    --sound off \
+    --sound on \
     --collisions on \
     --handicap on \
     --wall-recovery off \
-    --ranking off \
+    --start-random off \
+    --ranking on \
     --camera off \
     --lidar off
 
