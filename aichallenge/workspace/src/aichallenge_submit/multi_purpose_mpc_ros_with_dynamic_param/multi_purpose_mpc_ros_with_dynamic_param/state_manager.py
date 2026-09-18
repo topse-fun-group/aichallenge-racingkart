@@ -21,6 +21,7 @@ from multi_purpose_mpc_ros_with_dynamic_param.states import (
     DrivingState,
     FollowPathState,
     RecoveryState,
+    EmergencyState,
     FollowState,
     OvertakeState,
     StateContext,
@@ -42,6 +43,8 @@ class StateManager:
         self._states: Dict[str, DrivingState] = {
             "follow_path": FollowPathState(),
             "recovery": RecoveryState(),
+            # 緊急回避 (ADR-059)。手動トピックでのみ到達する独立した脱出モード。
+            "emergency": EmergencyState(),
             "follow": FollowState(),
             "overtake": OvertakeState(),
         }
@@ -81,6 +84,22 @@ class StateManager:
         ``MPCStateParams`` when a transition occurred (caller must apply
         them to the MPC), or ``None`` when the state is unchanged.
         """
+        # --- 緊急回避 (ADR-059) ------------------------------------------------
+        # 手動トピックの要求があれば、**どの状態からでも最優先**で遷移する。
+        # 既存の check_transition をそもそも呼ばないので、通常の遷移条件には
+        # 一切影響しない。要求は mpc_controller がラッチし、緊急モードに入ったら
+        # 同じく mpc_controller が消費する (消費しないと抜けた瞬間に再突入する)。
+        if ctx.emergency_request and self._current.name != "emergency":
+            prev_name = self._current.name
+            self._current.on_exit(ctx)
+            self._current = self._states["emergency"]
+            self._current.on_enter(ctx)
+            self._last_transition_time = ctx.current_time_sec
+            self._logger.warn(
+                f"[StateManager] {prev_name} → emergency (manual request)")
+            self._publish_state()
+            return self._current.get_params()
+
         next_name = self._current.check_transition(ctx)
 
         if next_name is None or next_name == self._current.name:
@@ -92,8 +111,10 @@ class StateManager:
         # 1.0s は forward_turn の大舵角前進 (+7 m/s, ±0.55 rad) が出続けてコースを外れる。
         # recovery への再突入は衝突ラッチのクリア (mpc_controller の recovery 退出処理) と
         # スタック検知のクールダウンで守られている。
+        # emergency も recovery と同じく免除する。免除しないと 3m 到達後も
+        # 最大 MIN_DWELL_TIME だけ後退指令が出続け、下がりすぎる (ADR-059)。
         if (next_name != "recovery"
-                and self._current.name != "recovery"
+                and self._current.name not in ("recovery", "emergency")
                 and self._last_transition_time is not None):
             dwell = ctx.current_time_sec - self._last_transition_time
             if dwell < self.MIN_DWELL_TIME:

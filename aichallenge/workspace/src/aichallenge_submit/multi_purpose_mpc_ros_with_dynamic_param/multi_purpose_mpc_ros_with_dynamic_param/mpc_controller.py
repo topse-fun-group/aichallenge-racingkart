@@ -229,6 +229,15 @@ class MPCController(Node):
             "stuck_velocity_threshold": ("STUCK_VELOCITY_THRESHOLD", float(states.STUCK_VELOCITY_THRESHOLD)),
             "stuck_duration": ("STUCK_DURATION", float(states.STUCK_DURATION)),
             "recovery_cooldown_sec": ("RECOVERY_COOLDOWN_SEC", float(states.RECOVERY_COOLDOWN_SEC)),
+            "emergency_back_distance_m": ("EMERGENCY_BACK_DISTANCE_M", float(states.EMERGENCY_BACK_DISTANCE_M)),
+            "emergency_back_speed_mps": ("EMERGENCY_BACK_SPEED_MPS", float(states.EMERGENCY_BACK_SPEED_MPS)),
+            "emergency_back_accel_mpss": ("EMERGENCY_BACK_ACCEL_MPSS", float(states.EMERGENCY_BACK_ACCEL_MPSS)),
+            "emergency_heading_from_ey": ("EMERGENCY_HEADING_FROM_EY", float(states.EMERGENCY_HEADING_FROM_EY)),
+            "emergency_heading_max_rad": ("EMERGENCY_HEADING_MAX_RAD", float(states.EMERGENCY_HEADING_MAX_RAD)),
+            "emergency_steer_k": ("EMERGENCY_STEER_K", float(states.EMERGENCY_STEER_K)),
+            "emergency_steer_max_rad": ("EMERGENCY_STEER_MAX_RAD", float(states.EMERGENCY_STEER_MAX_RAD)),
+            "emergency_align_start": ("EMERGENCY_ALIGN_START", float(states.EMERGENCY_ALIGN_START)),
+            "emergency_timeout_sec": ("EMERGENCY_TIMEOUT_SEC", float(states.EMERGENCY_TIMEOUT_SEC)),
             "forward_cone_deg": ("FORWARD_CONE_DEG", float(states.FORWARD_CONE_DEG)),
             "forward_lateral_max": ("FORWARD_LATERAL_MAX", float(states.FORWARD_LATERAL_MAX)),
             "follow_lateral_clear_m": ("FOLLOW_LATERAL_CLEAR_M", float(states.FOLLOW_LATERAL_CLEAR_M)),
@@ -424,6 +433,7 @@ class MPCController(Node):
         self._has_ever_moved = False  # 一度でも走り出したか (グリッド待機の除外用)
         self._start_time = None
         self._last_recovery_exit_time = None
+        self._emergency_requested = False  # 緊急回避の手動要求ラッチ (ADR-059)
         self._overtake_exit_time = None  # 追い越しを抜けた時刻 (復帰中の速度制限用)
         # (d_offset, weight, alpha, steer_cmd, ego_e_y)。追い越し操舵の診断 (ADR-049)
         self._shift_diag = None
@@ -501,6 +511,24 @@ class MPCController(Node):
             Trajectory, "planning/scenario_planning/trajectory", self._trajectory_callback, trajectory_qos)
         self._stop_request_sub = self.create_subscription(
             Empty, "/control/mpc/stop_request", self._stop_request_callback, 1)
+        # 緊急回避 (ADR-059)。人が手で発行するトピックだけがトリガー。
+        #   ros2 topic pub -1 /control/final/emergency_request std_msgs/msg/Empty '{}'
+        #
+        # 本番で許されている操作はトピック発行だけなので、発行側の QoS が何であっても
+        # 必ず繋がるように RELIABLE と BEST_EFFORT の両方で購読する。
+        # ROS 2 の QoS 互換性では publisher=BEST_EFFORT と subscriber=RELIABLE が
+        # 非互換で、**何のエラーも出ないまま一度も届かない**。緊急用の経路で
+        # この無言の失敗は許容できない。二重に届いてもラッチは冪等なので害はない。
+        self._emergency_request_sub = self.create_subscription(
+            Empty, "/control/final/emergency_request",
+            self._emergency_request_callback,
+            QoSProfile(reliability=QoSReliabilityPolicy.RELIABLE,
+                       history=QoSHistoryPolicy.KEEP_LAST, depth=10))
+        self._emergency_request_sub_be = self.create_subscription(
+            Empty, "/control/final/emergency_request",
+            self._emergency_request_callback,
+            QoSProfile(reliability=QoSReliabilityPolicy.BEST_EFFORT,
+                       history=QoSHistoryPolicy.KEEP_LAST, depth=10))
 
         if self.use_sim_time:
             self._awsim_status_sub = self.create_subscription(
@@ -610,6 +638,15 @@ class MPCController(Node):
         if self._enable_control:
             self.get_logger().warn(f"Stop request received {self._enable_control}")
             self._enable_control = False
+
+    def _emergency_request_callback(self, msg: Empty) -> None:
+        """緊急回避の手動要求 (ADR-059)。どの状態からでも最優先で緊急モードへ入る。
+
+        ラッチするだけで、遷移の判断は StateManager が行う。ラッチの消費も
+        mpc_controller 側 (_control) で行う。
+        """
+        self._emergency_requested = True
+        self.get_logger().warn("Emergency avoidance requested (manual)")
 
     def _wait_until_clock_received(self) -> None:
         if self.use_sim_time:
@@ -1314,6 +1351,7 @@ class MPCController(Node):
             has_right_side_cutin_hazard=has_r_cutin,
             time_stopped_sec=time_stopped,
             is_in_recovery_cooldown=is_cooldown,
+            emergency_request=self._emergency_requested,
             # boost使用時に以下をコメントアウト。
             publish_boost=self._publish_boost,
             log_event=self.get_logger().info,
@@ -1384,6 +1422,27 @@ class MPCController(Node):
             # ±2.5m から 0 へ一瞬で戻る (OvertakeState だけが WAYPOINT_SHIFT で、
             # follow / follow_path は素の Pure Pursuit) ため、まだ 1.4〜3.4m 前に
             # いる先行車の車線へ切り返す形になる。復帰の間だけ速度を絞る。
+            # --- 緊急回避 (ADR-059) --------------------------------------------
+            # 緊急モードに入ったらラッチを消費する。残したままだと
+            # StateManager の最優先分岐が毎 tick 成立し、3m 下がって抜けた瞬間に
+            # 再突入して永久に後退し続ける。
+            if self._state_manager.current_state_name == "emergency":
+                self._emergency_requested = False
+
+            # 緊急回避を抜けたときの後始末。recovery の後始末とは別物なので
+            # ブロックも分けてある (RecoveryState とは完全に独立)。
+            if prev_state_name == "emergency" and self._state_manager.current_state_name != "emergency":
+                # override の後退で _last_u[0] に負値が残るため前進側へ戻す。
+                self._last_u[0] = 1.5
+                self._last_acc = 1.0
+                # 衝突ラッチを消す。残っていると 3m 下がって戻った直後に
+                # follow_path / follow / overtake が即 "recovery" を返し、
+                # 報告された無限ループがそのまま再開する。本機能の目的そのもの。
+                self._last_colliding_time = None
+                # スタック検知による recovery 再突入も RECOVERY_COOLDOWN_SEC の間抑える。
+                self._last_recovery_exit_time = (now.nanoseconds / 1e9)
+                self.get_logger().info("Exited EmergencyState: latch cleared")
+
             if prev_state_name == "overtake" and self._state_manager.current_state_name != "overtake":
                 self._overtake_exit_time = (now.nanoseconds / 1e9)
 

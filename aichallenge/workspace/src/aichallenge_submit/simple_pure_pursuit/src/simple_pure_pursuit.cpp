@@ -28,8 +28,8 @@ SimplePurePursuit::SimplePurePursuit()
           declare_parameter<float>("external_target_vel", 0.0)),
       steering_tire_angle_gain_(
           declare_parameter<float>("steering_tire_angle_gain", 1.0)),
-      speed_scale_factor_(declare_parameter<float>("speed_scale_factor", 1.0))
-          max_acceleration_(declare_parameter<float>("max_acceleration", 3.0)) {
+      speed_scale_factor_(declare_parameter<float>("speed_scale_factor", 1.0)),
+      max_acceleration_(declare_parameter<float>("max_acceleration", 3.0)) {
   pub_cmd_ = create_publisher<AckermannControlCommand>("output/control_cmd", 1);
   pub_raw_cmd_ =
       create_publisher<AckermannControlCommand>("output/raw_control_cmd", 1);

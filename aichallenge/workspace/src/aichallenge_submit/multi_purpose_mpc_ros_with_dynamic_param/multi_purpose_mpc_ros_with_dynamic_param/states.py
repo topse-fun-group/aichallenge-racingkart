@@ -187,6 +187,37 @@ VEHICLE_V_MAX  = 35.0  # [km/s] 最大速度
 
 
 # ---------------------------------------------------------------------------
+# 緊急回避 (ADR-059)
+# ---------------------------------------------------------------------------
+# 決勝大会の事前走行で「前方車両が近距離で完全停止すると RecoveryState が
+# 無限ループに入り、前方車両への衝突を繰り返す」事象が出た。通常制御を触ると
+# 不安定化するリスクがあるため、**手動トピックでのみ発火する独立した脱出モード**を
+# 足す。RecoveryState とは状態・動作・定数のいずれも共有しない。
+EMERGENCY_BACK_DISTANCE_M = 3.0    # [m]     **後退した**距離。前進の惰性は数えない
+EMERGENCY_BACK_SPEED_MPS  = -32.0  # [m/s]   後退指令。override 経路は np.clip を
+                                   #         通らないので、実効値は車両モデル側で決まる
+EMERGENCY_BACK_ACCEL_MPSS = 3.0    # [m/s^2]
+# 後退中に経路へ戻すための操舵ゲイン。**前進とは舵角の効き方が逆**になるので
+# 符号の導出はクラス docstring を参照。数値シミュレーションで、横偏差 1.0m から
+# 3m 後退すると 0.21m / 姿勢 11 度まで収束することを確認済み。
+EMERGENCY_HEADING_FROM_EY = 1.2    # [rad/m] 横偏差 -> 目標姿勢
+EMERGENCY_HEADING_MAX_RAD = 0.9    # [rad]   目標姿勢の上限 (52 度)
+EMERGENCY_STEER_K         = 3.0    # [-]     姿勢誤差 -> 舵角
+EMERGENCY_STEER_MAX_RAD   = 0.9    # [rad]   舵角の上限 (52 度)。出版時は x1.639 で
+                                   #         85 度相当。通常走行の指令舵角も 95% 分位が
+                                   #         79 度なので範囲内。復帰の 1.55rad (89 度、
+                                   #         出版 146 度) のような実用外の値は使わない
+# 後半は目標姿勢を 0 へ落として「経路と平行」に揃えることを優先する。これが無いと
+# 目標姿勢が横偏差に比例したままなので、**横偏差が残る限り車体が斜めで終わる**
+# (実測で「経路と平行にならない」として報告された)。ゲインや舵角上限を上げても
+# 解決せず、シミュレーションでは終端の姿勢誤差が 24 度 -> 33 度 と逆に悪化した。
+EMERGENCY_ALIGN_START     = 0.5    # [-]     後退の進捗がこれを超えたら姿勢合わせへ移る
+EMERGENCY_TIMEOUT_SEC     = 8.0    # [s]     車体が噛んで動けないときに抜けるための保険。
+                                   #         走行中に発行されると減速に数秒要るので、
+                                   #         後退 3m ぶんの余裕を見て 6.0 -> 8.0 にした
+
+
+# ---------------------------------------------------------------------------
 # Data transfer objects
 # ---------------------------------------------------------------------------
 @dataclass
@@ -263,6 +294,9 @@ class StateContext:
     # --- Stuck detection ----------------------------------------------------
     time_stopped_sec: float = 0.0  # duration velocity ≈ 0 [s]
     is_in_recovery_cooldown: bool = False  # True during cooldown after recovery / startup
+    # 緊急回避の手動要求 (ADR-059)。mpc_controller が
+    # /control/final/emergency_request の受信でラッチする。自動では絶対に立たない。
+    emergency_request: bool = False
 
     # --- Boost ----------------------------------------------------
     # boost送信コールバック (1.0: ON, 0.0: OFF)
@@ -1061,6 +1095,169 @@ class RecoveryState(DrivingState):
         # phase == "forward_turn" (前進旋回)
         steer_cmd = float(-self._steer_sign * mag)
         return (self.RECOVERY_FORWARD_TURN_SPEED_MPS, steer_cmd, self.RECOVERY_FORWARD_ACCEL_MPSS)
+
+
+
+class EmergencyState(DrivingState):
+    """手動トピックでのみ発火する緊急脱出。まっすぐ 3m 後退して follow_path へ返す。
+
+    背景
+    ----
+    決勝大会の事前走行で「前方車両が近距離で完全停止すると RecoveryState が
+    無限ループに入り、前方車両への衝突を繰り返す」事象が出た。最終バージョンの
+    通常制御を触るのは不安定化のリスクがあるため、**人の判断で発行する
+    ROS トピックだけをトリガーにした独立した脱出経路**を用意する。
+
+    RecoveryState との関係
+    ----------------------
+    **完全に独立。** 継承もせず、コードも定数も共有しない。RecoveryState は
+    「またぐ向きを作る後退 -> 旋回前進」の 2 フェーズで姿勢を立て直す自動復帰だが、
+    こちらは「まっすぐ下がって距離を稼ぐ」だけの 1 フェーズで、姿勢は一切見ない。
+
+    舵角
+    ----
+    後退しながら**経路の中心へ戻り、かつ経路と平行な姿勢に揃える**。
+    横偏差から目標姿勢を作り、その姿勢誤差から舵角を出す二段の比例制御。
+
+    **後退では舵角の効き方が前進と逆になる。** 自転車モデル (後軸基準) で
+
+        e_y_dot  = v * sin(e_psi)
+        psi_dot  = (v / L) * tan(delta)
+
+    であり後退は ``v < 0`` なので、
+
+    - ``e_y > 0`` (経路の左にいる) を減らすには ``e_y_dot < 0``、すなわち
+      ``sin(e_psi) > 0`` → **``e_psi > 0`` (機首を左) を作る**
+    - ``e_psi`` を増やすには ``psi_dot > 0``、すなわち ``tan(delta) < 0``
+      → **``delta < 0`` (右に切る)**
+
+    まとめると ``delta = K * (e_psi - target_psi)``、``target_psi = K_ey * e_y``。
+    左にいるほど右へ切る、という前進とは逆の関係になる。
+
+    **後半は目標姿勢を 0 へ落として「経路と平行」を優先する。** これが無いと、
+    目標姿勢が横偏差に比例したままなので**横偏差が残る限り車体が斜めで終わる**。
+    ゲインや舵角上限を上げても解決せず、シミュレーションでは終端の姿勢誤差が
+    24 度 -> 33 度 と逆に悪化した。進捗が ``EMERGENCY_ALIGN_START`` を超えたら
+    目標姿勢を線形に 0 へ落とす。
+
+    **前進の惰性が残っている間 (``v >= 0``) は舵角を 0 にする。** 進行方向が逆だと
+    同じ舵角が逆に効くため、減速しきるまでは切らない。
+
+    数値シミュレーション (L=1.087, v=-2m/s, 3m 後退) での収束:
+
+    ========  ==========  ==========  ===========
+    初期 e_y  初期 e_psi  3m後 e_y    3m後 e_psi
+    ========  ==========  ==========  ===========
+    +1.0 m    0 deg       -0.01 m     +1 deg
+    -1.0 m    0 deg       +0.01 m     -1 deg
+     0.0 m    +17 deg     +0.00 m      0 deg
+    +1.5 m    -11 deg     +0.15 m     +5 deg
+    +2.0 m    +17 deg     +0.24 m     +6 deg
+    ========  ==========  ==========  ===========
+
+    離脱
+    ----
+    **実際に後退した距離**が ``EMERGENCY_BACK_DISTANCE_M`` に達したら
+    ``follow_path`` へ返す。速度が負の間だけ ``|v| * dt`` を積むので、
+    姿勢にも経路にも依存しない。
+
+    突入位置からの直線距離で測ってはいけない。走行中に発行されると減速までに
+    惰性で前へ進み、**後退を始める前に「3m 動いた」が成立して抜けてしまう**
+    (実測: 22km/h で発行し 0.48 秒・前進のまま ``reason=backed`` で離脱した)。
+
+    車体が噛んで動けない場合に備えて ``EMERGENCY_TIMEOUT_SEC`` の保険を持つ。
+    """
+
+    def __init__(self) -> None:
+        self._enter_time: Optional[float] = None
+        self._backed_m: float = 0.0   # 実際に後退した積算距離 [m]
+
+    @property
+    def name(self) -> str:
+        return "emergency"
+
+    @property
+    def control_mode(self) -> ControlMode:
+        return ControlMode.OVERRIDE
+
+    @property
+    def gear(self) -> int:
+        return GEAR_REVERSE
+
+    def get_params(self) -> MPCStateParams:
+        # override 中は MPC を回さないので実際には使われないが、
+        # 遷移時に _apply_state_params へ渡されるため保守的な値を返す。
+        return MPCStateParams(
+            v_max=18.0,
+            ay_max=3.0,
+            Q=[5_000_000.0, 100_000_000.0, 200_000.0],
+            R=[100_000.0, 0.0],
+            QN=[1_000_000.0, 1_000.0, 10_000.0],
+        )
+
+    def on_enter(self, ctx: StateContext) -> None:
+        self._enter_time = ctx.current_time_sec
+        self._backed_m = 0.0
+
+    def on_exit(self, ctx: StateContext) -> None:
+        self._enter_time = None
+
+    def check_transition(self, ctx: StateContext) -> Optional[str]:
+        if self._enter_time is None:
+            return None
+
+        # 速度が負のとき (= 実際に後退しているとき) だけ距離を積む。
+        # 前進の惰性を数えると、走行中に発行されたときに後退を始める前に
+        # 条件が成立して抜けてしまう (クラス docstring 参照)。
+        if ctx.velocity < 0.0:
+            self._backed_m += -ctx.velocity * ctx.dt
+
+        if self._backed_m >= EMERGENCY_BACK_DISTANCE_M:
+            return self._exit(ctx, "follow_path", "backed")
+
+        # 車体が噛んで動けないまま緊急モードに留まり続けるのを防ぐ。
+        if ctx.current_time_sec - self._enter_time >= EMERGENCY_TIMEOUT_SEC:
+            return self._exit(ctx, "follow_path", "timeout")
+
+        return None
+
+    def compute_control_override(
+        self, ctx: StateContext
+    ) -> Optional[Tuple[float, float, float]]:
+        # 速度が負なので mpc_controller は後退経路に入り、ローパスを飛ばして
+        # そのまま longitudinal.speed / .acceleration に載せる。
+        return (EMERGENCY_BACK_SPEED_MPS, self._steer_cmd(ctx), EMERGENCY_BACK_ACCEL_MPSS)
+
+    def _steer_cmd(self, ctx: StateContext) -> float:
+        """後退しながら経路の中心・姿勢へ戻すための舵角 [rad]。
+
+        符号の導出はクラス docstring を参照。前進の惰性が残っている間は
+        舵角の効き方が逆になるので切らない。
+        """
+        if ctx.velocity >= 0.0:
+            return 0.0
+
+        # 経路方位に対する自車 heading のずれ。左が正、[-pi, pi) に正規化。
+        e_psi = (ctx.pose_theta - ctx.path_psi + np.pi) % (2 * np.pi) - np.pi
+
+        # 後退では e_y_dot = v*sin(e_psi) (v<0) なので、左にいる (e_y>0) ほど
+        # 機首を左へ向ける (e_psi>0) と中心へ戻る。
+        target_psi = float(np.clip(EMERGENCY_HEADING_FROM_EY * ctx.path_e_y,
+                                   -EMERGENCY_HEADING_MAX_RAD,
+                                   EMERGENCY_HEADING_MAX_RAD))
+
+        # 後半は目標姿勢を 0 へ落として、経路と平行に揃えることを優先する。
+        # これが無いと横偏差が残る限り斜めのまま終わる (クラス docstring 参照)。
+        progress = self._backed_m / max(EMERGENCY_BACK_DISTANCE_M, 1e-6)
+        align = float(np.clip((progress - EMERGENCY_ALIGN_START)
+                              / max(1.0 - EMERGENCY_ALIGN_START, 1e-6), 0.0, 1.0))
+        target_psi *= (1.0 - align)
+
+        # psi_dot = (v/L)tan(delta) で v<0 なので、目標姿勢へ近づけるには
+        # 前進時と符号が裏返る (= そのまま e_psi - target_psi に比例させる)。
+        return float(np.clip(EMERGENCY_STEER_K * (e_psi - target_psi),
+                             -EMERGENCY_STEER_MAX_RAD,
+                             EMERGENCY_STEER_MAX_RAD))
 
 
 class FollowState(DrivingState):
