@@ -7,41 +7,50 @@
 
 #include <algorithm>
 
-namespace simple_pure_pursuit
-{
+namespace simple_pure_pursuit {
 
 using motion_utils::findNearestIndex;
 using tier4_autoware_utils::calcLateralDeviation;
 using tier4_autoware_utils::calcYawDeviation;
 
 SimplePurePursuit::SimplePurePursuit()
-: Node("simple_pure_pursuit"),
-  // initialize parameters
-  wheel_base_(declare_parameter<float>("wheel_base", 2.14)),
-  lookahead_gain_(declare_parameter<float>("lookahead_gain", 1.0)),
-  lookahead_min_distance_(declare_parameter<float>("lookahead_min_distance", 1.0)),
-  speed_proportional_gain_(declare_parameter<float>("speed_proportional_gain", 1.0)),
-  use_external_target_vel_(declare_parameter<bool>("use_external_target_vel", false)),
-  external_target_vel_(declare_parameter<float>("external_target_vel", 0.0)),
-  steering_tire_angle_gain_(declare_parameter<float>("steering_tire_angle_gain", 1.0)),
-  speed_scale_factor_(declare_parameter<float>("speed_scale_factor", 1.0))
-{
+    : Node("simple_pure_pursuit"),
+      // initialize parameters
+      wheel_base_(declare_parameter<float>("wheel_base", 2.14)),
+      lookahead_gain_(declare_parameter<float>("lookahead_gain", 1.0)),
+      lookahead_min_distance_(
+          declare_parameter<float>("lookahead_min_distance", 1.0)),
+      speed_proportional_gain_(
+          declare_parameter<float>("speed_proportional_gain", 1.0)),
+      use_external_target_vel_(
+          declare_parameter<bool>("use_external_target_vel", false)),
+      external_target_vel_(
+          declare_parameter<float>("external_target_vel", 0.0)),
+      steering_tire_angle_gain_(
+          declare_parameter<float>("steering_tire_angle_gain", 1.0)),
+      speed_scale_factor_(declare_parameter<float>("speed_scale_factor", 1.0)),
+      max_acceleration_(declare_parameter<float>("max_acceleration", 3.0)) {
   pub_cmd_ = create_publisher<AckermannControlCommand>("output/control_cmd", 1);
-  pub_raw_cmd_ = create_publisher<AckermannControlCommand>("output/raw_control_cmd", 1);
-  pub_lookahead_point_ = create_publisher<PointStamped>("/control/debug/lookahead_point", 1);
+  pub_raw_cmd_ =
+      create_publisher<AckermannControlCommand>("output/raw_control_cmd", 1);
+  pub_lookahead_point_ =
+      create_publisher<PointStamped>("/control/debug/lookahead_point", 1);
 
-  const auto bv_qos = rclcpp::QoS(rclcpp::KeepLast(1)).durability_volatile().best_effort();
+  const auto bv_qos =
+      rclcpp::QoS(rclcpp::KeepLast(1)).durability_volatile().best_effort();
   sub_kinematics_ = create_subscription<Odometry>(
-    "input/kinematics", bv_qos, [this](const Odometry::SharedPtr msg) { odometry_ = msg; });
+      "input/kinematics", bv_qos,
+      [this](const Odometry::SharedPtr msg) { odometry_ = msg; });
   sub_trajectory_ = create_subscription<Trajectory>(
-    "input/trajectory", bv_qos, [this](const Trajectory::SharedPtr msg) { trajectory_ = msg; });
+      "input/trajectory", bv_qos,
+      [this](const Trajectory::SharedPtr msg) { trajectory_ = msg; });
 
   using namespace std::literals::chrono_literals;
-  timer_ = create_wall_timer(10ms, std::bind(&SimplePurePursuit::onTimer, this));
+  timer_ =
+      create_wall_timer(10ms, std::bind(&SimplePurePursuit::onTimer, this));
 }
 
-AckermannControlCommand zeroAckermannControlCommand(rclcpp::Time stamp)
-{
+AckermannControlCommand zeroAckermannControlCommand(rclcpp::Time stamp) {
   AckermannControlCommand cmd;
   cmd.stamp = stamp;
   cmd.longitudinal.stamp = stamp;
@@ -52,46 +61,54 @@ AckermannControlCommand zeroAckermannControlCommand(rclcpp::Time stamp)
   return cmd;
 }
 
-void SimplePurePursuit::onTimer()
-{
+void SimplePurePursuit::onTimer() {
   // check data
   if (!subscribeMessageAvailable()) {
     return;
   }
 
   size_t closet_traj_point_idx =
-    findNearestIndex(trajectory_->points, odometry_->pose.pose.position);
+      findNearestIndex(trajectory_->points, odometry_->pose.pose.position);
 
   // publish zero command
   AckermannControlCommand cmd = zeroAckermannControlCommand(get_clock()->now());
 
   // get closest trajectory point from current position
-  TrajectoryPoint closet_traj_point = trajectory_->points.at(closet_traj_point_idx);
+  TrajectoryPoint closet_traj_point =
+      trajectory_->points.at(closet_traj_point_idx);
 
   // calc longitudinal speed and acceleration
   double target_longitudinal_vel =
-    (use_external_target_vel_ ? external_target_vel_ : closet_traj_point.longitudinal_velocity_mps) * speed_scale_factor_;
+      (use_external_target_vel_ ? external_target_vel_
+                                : closet_traj_point.longitudinal_velocity_mps) *
+      speed_scale_factor_;
   double current_longitudinal_vel = odometry_->twist.twist.linear.x;
 
   cmd.longitudinal.speed = target_longitudinal_vel;
-  double accel = speed_proportional_gain_ * (target_longitudinal_vel - current_longitudinal_vel);
-  cmd.longitudinal.acceleration = std::max(-1.6, std::min(1.0, accel));
+  cmd.longitudinal.acceleration =
+      speed_proportional_gain_ *
+      (target_longitudinal_vel - current_longitudinal_vel);
+  cmd.longitudinal.acceleration =
+      std::min<double>(cmd.longitudinal.acceleration, max_acceleration_);
 
   // calc lateral control
   //// calc lookahead distance
-  double lookahead_distance = lookahead_gain_ * target_longitudinal_vel + lookahead_min_distance_;
+  double lookahead_distance =
+      lookahead_gain_ * target_longitudinal_vel + lookahead_min_distance_;
   //// calc center coordinate of rear wheel
-  double rear_x = odometry_->pose.pose.position.x -
-                  wheel_base_ / 2.0 * std::cos(odometry_->pose.pose.orientation.z);
-  double rear_y = odometry_->pose.pose.position.y -
-                  wheel_base_ / 2.0 * std::sin(odometry_->pose.pose.orientation.z);
+  double rear_x =
+      odometry_->pose.pose.position.x -
+      wheel_base_ / 2.0 * std::cos(odometry_->pose.pose.orientation.z);
+  double rear_y =
+      odometry_->pose.pose.position.y -
+      wheel_base_ / 2.0 * std::sin(odometry_->pose.pose.orientation.z);
   //// search lookahead point
   auto lookahead_point_itr = std::find_if(
-    trajectory_->points.begin() + closet_traj_point_idx, trajectory_->points.end(),
-    [&](const TrajectoryPoint & point) {
-      return std::hypot(point.pose.position.x - rear_x, point.pose.position.y - rear_y) >=
-             lookahead_distance;
-    });
+      trajectory_->points.begin() + closet_traj_point_idx,
+      trajectory_->points.end(), [&](const TrajectoryPoint &point) {
+        return std::hypot(point.pose.position.x - rear_x,
+                          point.pose.position.y - rear_y) >= lookahead_distance;
+      });
   double lookahead_point_x = lookahead_point_itr->pose.position.x;
   double lookahead_point_y = lookahead_point_itr->pose.position.y;
 
@@ -104,36 +121,39 @@ void SimplePurePursuit::onTimer()
   pub_lookahead_point_->publish(lookahead_point_msg);
 
   // calc steering angle for lateral control
-  double alpha = std::atan2(lookahead_point_y - rear_y, lookahead_point_x - rear_x) -
-                 tf2::getYaw(odometry_->pose.pose.orientation);
+  double alpha =
+      std::atan2(lookahead_point_y - rear_y, lookahead_point_x - rear_x) -
+      tf2::getYaw(odometry_->pose.pose.orientation);
   cmd.lateral.steering_tire_angle =
-    steering_tire_angle_gain_ * std::atan2(2.0 * wheel_base_ * std::sin(alpha), lookahead_distance);
+      steering_tire_angle_gain_ *
+      std::atan2(2.0 * wheel_base_ * std::sin(alpha), lookahead_distance);
 
   pub_cmd_->publish(cmd);
-  cmd.lateral.steering_tire_angle /=  steering_tire_angle_gain_;
+  cmd.lateral.steering_tire_angle /= steering_tire_angle_gain_;
   pub_raw_cmd_->publish(cmd);
 }
 
-bool SimplePurePursuit::subscribeMessageAvailable()
-{
+bool SimplePurePursuit::subscribeMessageAvailable() {
   if (!odometry_) {
-    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000 /*ms*/, "odometry is not available");
+    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000 /*ms*/,
+                         "odometry is not available");
     return false;
   }
   if (!trajectory_) {
-    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000 /*ms*/, "trajectory is not available");
+    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000 /*ms*/,
+                         "trajectory is not available");
     return false;
   }
   if (trajectory_->points.empty()) {
-      RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000 /*ms*/,  "trajectory points is empty");
-      return false;
-    }
+    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000 /*ms*/,
+                         "trajectory points is empty");
+    return false;
+  }
   return true;
 }
-}  // namespace simple_pure_pursuit
+} // namespace simple_pure_pursuit
 
-int main(int argc, char const * argv[])
-{
+int main(int argc, char const *argv[]) {
   rclcpp::init(argc, argv);
   rclcpp::spin(std::make_shared<simple_pure_pursuit::SimplePurePursuit>());
   rclcpp::shutdown();

@@ -53,8 +53,12 @@ export ROS_LOG_DIR="${ROS_HOME}/log"
 mkdir -p "${ROS_LOG_DIR}"
 
 source_setup "/opt/ros/humble/setup.bash"
-source_setup "/aichallenge/workspace/install/setup.bash"
-source_setup "${racing_kart_interface_dir}/install/setup.bash"
+if [ -f "/aichallenge/workspace/install/setup.bash" ]; then
+    source_setup "/aichallenge/workspace/install/setup.bash"
+fi
+if [ -f "${racing_kart_interface_dir}/install/setup.bash" ]; then
+    source_setup "${racing_kart_interface_dir}/install/setup.bash"
+fi
 
 record_cmd=(
     ros2 bag record

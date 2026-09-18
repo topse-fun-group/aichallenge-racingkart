@@ -14,6 +14,7 @@
     <param name="speed_proportional_gain" value="5.0"/>
     <param name="speed_scale_factor" value="1.20"/>
     <param name="steering_tire_angle_gain" value="$(var steering_tire_angle_gain_var)"/>
+    <param name="max_acceleration" value="3.0"/>
 
     <remap from="input/kinematics" to="/localization/kinematic_state"/>
     <remap from="input/trajectory" to="/planning/scenario_planning/trajectory"/>

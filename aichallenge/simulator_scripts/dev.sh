@@ -18,7 +18,7 @@ exec $AWSIM_DIRECTORY/AWSIM.x86_64 \
     --steer-source ackermann \
     --sound off \
     --collisions on \
-    --handicap off \
+    --handicap on \
     --wall-recovery off \
     --ranking off \
     --camera off \
